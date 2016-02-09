@@ -604,11 +604,9 @@ def scan_from_json(text, filename='scan.001', current_rois=None,
 
     """
     sdict = json.loads(text)
-    print(" -- SCAN from JSON ", sdict, kws)
     scanopts = dict(filename=filename,
                     scandb=scandb,
                     prescan_func=prescan_func, _larch=_larch)
-    print("  -- scanoopts ", scanopts)
     #
     # create positioners
     if sdict['type'] == 'xafs':
@@ -688,7 +686,6 @@ def scan_from_json(text, filename='scan.001', current_rois=None,
 
     for dpars in sdict['detectors']:
         dpars['rois'] = rois
-        print("ADD DET ", dpars)
         scan.add_detector(get_detector(**dpars))
 
     # extra counters (not-triggered things to count
