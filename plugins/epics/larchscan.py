@@ -101,10 +101,10 @@ try:
 except ImportError:
     HAS_EPICS = False
 
-try: 
+try:
     import epicsscan
     from epicsscan import (Counter, Trigger, AreaDetector, get_detector,
-                           ASCIIScanFile, Positioner)
+                           ASCIIScanFile, Positioner, StepScan, XAFS_Scan)
     from epicsscan.scandb import ScanDBException, ScanDBAbort
 
     HAS_EPICSSCAN = True
@@ -130,15 +130,15 @@ class PVSlaveThread(threading.Thread):
     Sets up a Thread to allow a Master Index PV (say, an advancing channel)
     to send a Slave PV to a value from a pre-defined array.
 
-    undulator = PVSlaveThread(master_pvname='13IDE:SIS1:CurrentChannel', 
+    undulator = PVSlaveThread(master_pvname='13IDE:SIS1:CurrentChannel',
                               slave_pvname='ID13us:ScanEnergy')
     undulator.set_array(array_of_values)
     undulator.enable()
     # start thread
     undulator.start()
-    
+
     # other code that may trigger the master PV
-    
+
     # to finish, set 'running' to False, and join() thread
     undulator.running = False
     undulator.join()
@@ -169,7 +169,7 @@ class PVSlaveThread(threading.Thread):
 
     def onPulse(self, pvname, value=1, **kws):
         self.pulse  = max(0, min(self.maxpts, value + self.offset))
-        
+
     def set_array(self, vals):
         "set array values for slave PV"
         n = len(vals)
@@ -193,843 +193,12 @@ class PVSlaveThread(threading.Thread):
                     print("Cannot Caput: ", self.slave.pvname , val)
                 self.last = self.pulse
 
-
-def etok(energy):
-    return np.sqrt(energy/XAFS_K2E)
-
 def ktoe(k):
     return k*k*XAFS_K2E
 
 def energy2angle(energy, dspace=3.13555):
     omega   = HC/(2.0 * dspace)
     return RAD2DEG * np.arcsin(omega/energy)
-
-def hms(secs):
-    "format time in seconds to H:M:S"
-    return str(timedelta(seconds=int(secs)))
-
-class ScanMessenger(threading.Thread):
-    """ Provides a way to run user-supplied functions per scan point,
-    in a separate thread, so as to not delay scan operation.
-
-    Initialize a ScanMessenger with a function to call per point, and the
-    StepScan instance.  On .start(), a separate thread will createrd and
-    the .run() method run.  Here, this runs a loop, looking at the .cpt
-    attribute.  When this .cpt changes, the executing will run the user
-    supplied code with arguments of 'scan=scan instance', and 'cpt=cpt'
-
-    Thus, at each point in the scan the scanning process should set .cpt,
-    and the user-supplied func will execute.
-
-    To stop the thread, set .cpt to None.  The thread will also automatically
-    stop if .cpt has not changed in more than 1 hour
-    """
-    # number of seconds to wait for .cpt to change before exiting thread
-    timeout = 3600.
-    def __init__(self, func=None, scan=None,
-                 cpt=-1, npts=None, func_kws=None):
-        threading.Thread.__init__(self)
-        self.func = func
-        self.scan = scan
-        self.cpt = cpt
-        self.npts = npts
-        if func_kws is None:
-            func_kws = {}
-        self.func_kws = func_kws
-        self.func_kws['npts'] = npts
-
-    def run(self):
-        """execute thread, watching the .cpt attribute. Any chnage will
-        cause self.func(cpt=self.cpt, scan=self.scan) to be run.
-        The thread will stop when .pt == None or has not changed in
-        a time  > .timeout
-        """
-        last_point = self.cpt
-        t0 = time.time()
-
-
-        while True:
-            poll(MIN_POLL_TIME, 0.25)
-            if self.cpt != last_point:
-                last_point =  self.cpt
-                t0 = time.time()
-                if self.cpt is not None and hasattr(self.func, '__call__'):
-                    self.func(cpt=self.cpt, scan=self.scan,
-                              **self.func_kws)
-            if self.cpt is None or time.time()-t0 > self.timeout:
-                return
-
-class LarchStepScan(object):
-    """
-    Epics Step Scanning for Larch
-    """
-    def __init__(self, filename=None, auto_increment=True, _larch=None):
-        self.pos_settle_time = MIN_POLL_TIME
-        self.det_settle_time = MIN_POLL_TIME
-        self.pos_maxmove_time = 3600.0
-        self.det_maxcount_time = 86400.0
-        self._larch = _larch
-        self._scangroup =  _larch.symtable._scan
-        self.scandb = None
-        if getattr(self._scangroup, '_scandb', None) is not None:
-            self.scandb = self._scangroup._scandb
-
-        self.dwelltime = None
-        self.comments = None
-
-        self.filename = filename
-        self.auto_increment = auto_increment
-        self.filetype = 'ASCII'
-        self.scantype = 'linear'
-
-        self.verified = False
-        self.abort = False
-        self.pause = False
-        self.inittime = 0 # time to initialize scan (pre_scan, move to start, begin i/o)
-        self.looptime = 0 # time to run scan loop (even if aborted)
-        self.exittime = 0 # time to complete scan (post_scan, return positioners, complete i/o)
-        self.runtime  = 0 # inittime + looptime + exittime
-
-        self.cpt = 0
-        self.npts = 0
-        self.complete = False
-        self.debug = False
-        self.message_points = 25
-        self.extra_pvs = []
-        self.positioners = []
-        self.triggers = []
-        self.counters = []
-        self.detectors = []
-
-        self.breakpoints = []
-        self.at_break_methods = []
-        self.pre_scan_methods = []
-        self.post_scan_methods = []
-        self.pos_actual  = []
-
-    def set_info(self, attr, value):
-        """set scan info to _scan variable"""
-        setattr(self._scangroup, attr, value)
-        if self.scandb is not None:
-            self.scandb.set_info(attr, value)
-            self.scandb.set_info('heartbeat', time.ctime())
-
-    def open_output_file(self, filename=None, comments=None):
-        """opens the output file"""
-        creator = ASCIIScanFile
-        # if self.filetype == 'ASCII':
-        #     creator = ASCIIScanFile
-        if filename is not None:
-            self.filename = filename
-        if comments is not None:
-            self.comments = comments
-
-        return creator(name=self.filename,
-                       auto_increment=self.auto_increment,
-                       comments=self.comments, scan=self)
-
-    def add_counter(self, counter, label=None):
-        "add simple counter"
-        if isinstance(counter, (str, unicode)):
-            counter = Counter(counter, label)
-        if counter not in self.counters:
-            self.counters.append(counter)
-        self.verified = False
-
-    def add_trigger(self, trigger, label=None, value=1):
-        "add simple detector trigger"
-        if trigger is None:
-            return
-        if isinstance(trigger, (str, unicode)):
-            trigger = Trigger(trigger, label=label, value=value)
-        if trigger not in self.triggers:
-            self.triggers.append(trigger)
-        self.verified = False
-
-    def add_extra_pvs(self, extra_pvs):
-        """add extra pvs (tuple of (desc, pvname))"""
-        if extra_pvs is None or len(extra_pvs) == 0:
-            return
-        for desc, pvname in extra_pvs:
-            if isinstance(pvname, PV):
-                pv = pvname
-            else:
-                pv = get_pv(pvname)
-
-            if (desc, pv) not in self.extra_pvs:
-                self.extra_pvs.append((desc, pv))
-
-    def add_positioner(self, pos):
-        """ add a Positioner """
-        self.add_extra_pvs(pos.extra_pvs)
-        self.at_break_methods.append(pos.at_break)
-        self.post_scan_methods.append(pos.post_scan)
-        self.pre_scan_methods.append(pos.pre_scan)
-
-        if pos not in self.positioners:
-            self.positioners.append(pos)
-        self.verified = False
-
-    def add_detector(self, det):
-        """ add a Detector -- needs to be derived from Detector_Mixin"""
-        if det.extra_pvs is None: # not fully connected!
-            det.connect_counters()
-
-        self.add_extra_pvs(det.extra_pvs)
-        self.at_break_methods.append(det.at_break)
-        self.post_scan_methods.append(det.post_scan)
-        self.pre_scan_methods.append(det.pre_scan)
-        self.add_trigger(det.trigger)
-        for counter in det.counters:
-            self.add_counter(counter)
-
-        if det not in self.detectors:
-            self.detectors.append(det)
-        self.verified = False
-
-    def set_dwelltime(self, dtime=None):
-        """set scan dwelltime per point to constant value"""
-        if dtime is not None:
-            self.dwelltime = dtime
-        for d in self.detectors:
-            d.set_dwelltime(self.dwelltime)
-
-    def at_break(self, breakpoint=0, clear=False):
-        out = [m(breakpoint=breakpoint) for m in self.at_break_methods]
-        if self.datafile is not None:
-            self.datafile.write_data(breakpoint=breakpoint)
-        return out
-
-
-    def pre_scan(self, **kws):
-        if self.debug: print('Stepscan PRE SCAN ')
-        for (desc, pv) in self.extra_pvs:
-            pv.connect()
-        out = [m(scan=self) for m in self.pre_scan_methods]
-        for det in self.detectors:
-            for counter in det.counters:
-                self.add_counter(counter)
-
-        prescan_proc = None
-        try:
-            prescan_proc = self._larch.symtable.get_symbol('pre_scan_command')
-        except NameError:
-            pass
-        if prescan_proc is not None:
-            if (isinstance(prescan_proc, Group) and
-                hasattr(prescan_proc, 'pre_scan_command')):
-                prescan_proc = prescan_proc.pre_scan_command
-            try:
-                ret = prescan_proc(scan=self)
-            except:
-                ret = None                
-            out.append(ret)
-        return out
-
-    def post_scan(self):
-        if self.debug: print('Stepscan POST SCAN ')
-        return [m() for m in self.post_scan_methods]
-
-    def verify_scan(self):
-        """ this does some simple checks of Scans, checking that
-        the length of the positions array matches the length of the
-        positioners array.
-
-        For each Positioner, the max and min position is checked against
-        the HLM and LLM field (if available)
-        """
-        npts = None
-        for pos in self.positioners:
-            if not pos.verify_array():
-                self.set_error('Positioner {0} array out of bounds'.format(
-                    pos.pv.pvname))
-                return False
-            if npts is None:
-                npts = len(pos.array)
-            if len(pos.array) != npts:
-                self.set_error('Inconsistent positioner array length')
-                return False
-        return True
-
-
-    def check_outputs(self, out, msg='unknown'):
-        """ check outputs of a previous command
-            Any True value indicates an error
-        That is, return values must be None or evaluate to False
-        to indicate success.
-        """
-        if any(out):
-            raise Warning('error on output: %s' % msg)
-
-    def read_extra_pvs(self):
-        "read values for extra PVs"
-        out = []
-        for desc, pv in self.extra_pvs:
-            out.append((desc, pv.pvname, pv.get(as_string=True)))
-        return out
-
-    def clear_data(self):
-        """clear scan data"""
-        for c in self.counters:
-            c.clear()
-        self.pos_actual = []
-
-    def _messenger(self, cpt, npts=0, **kws):
-        time_left = (npts-cpt)* (self.pos_settle_time + self.det_settle_time)
-        if self.dwelltime_varys:
-            time_left += self.dwelltime[cpt:].sum()
-        else:
-            time_left += (npts-cpt)*self.dwelltime
-        self.set_info('scan_time_estimate', time_left)
-        time_est  = hms(time_left)
-        if cpt < 4:
-            self.set_info('filename', self.filename)
-        msg = 'Point %i/%i,  time left: %s' % (cpt, npts, time_est)
-        if cpt % self.message_points == 0:
-            self.write("%s\n" % msg)
-        self.set_info('scan_progress', msg)
-
-    def publish_scandata(self):
-        "post scan data to db"
-        if self.scandb is None:
-            return
-        for c in self.counters:
-            name = getattr(c, 'db_label', None)
-            if name is None:
-                name = c.label
-            c.db_label = fix_varname(name)
-            print(" - publish scandata - ", c, c.db_label, c.buff)
-            self.scandb.set_scandata(c.db_label, c.buff)
-
-    def set_error(self, msg):
-        """set scan error message"""
-        self._scangroup.error_message = msg
-        if self.scandb is not None:
-            self.set_info('last_error', msg)
-
-    def set_scandata(self, attr, value):
-        if self.scandb is not None:
-            self.scandb.set_scandata(fix_varname(attr), value)
-
-    def init_scandata(self):
-        if self.scandb is None:
-            return
-        self.scandb.clear_scandata()
-        names = []
-        npts = len(self.positioners[0].array)
-        for p in self.positioners:
-            try:
-                units = p.pv.units
-            except:
-                units = 'unknown'
-
-            name = fix_varname(p.label)
-            if name in names:
-                name += '_2'
-            if name not in names:
-                self.scandb.add_scandata(name, p.array.tolist(),
-                                         pvname=p.pv.pvname,
-                                         units=units, notes='positioner')
-                names.append(name)
-        for c in self.counters:
-            try:
-                units = c.pv.units
-            except:
-                units = 'counts'
-
-            name = fix_varname(c.label)
-            if name in names:
-                name += '_2'
-            if name not in names:
-                self.scandb.add_scandata(name, [],
-                                         pvname=c.pv.pvname,
-                                         units=units, notes='counter')
-                names.append(name)
-        self.scandb.commit()
-
-    def get_infobool(self, key):
-        if self.scandb is None:
-            return getattr(self._scan, key)
-        return self.scandb.get_info(key, as_bool=True)
-
-    def look_for_interrupts(self):
-        """set interrupt requests:
-
-        abort / pause / resume
-
-        if scandb is being used, these are looked up from database.
-        otherwise local larch variables are used.
-        """
-        self.abort  = self.get_infobool('request_abort')
-        self.pause  = self.get_infobool('request_pause')
-        self.resume = self.get_infobool('request_resume')
-        return self.abort
-
-    def write(self, msg):
-        self._larch.writer.write(msg)
-        
-    def clear_interrupts(self):
-        """re-set interrupt requests:
-
-        abort / pause / resume
-
-        if scandb is being used, these are looked up from database.
-        otherwise local larch variables are used.
-        """
-        self.abort = self.pause = self.resume = False
-        self.set_info('request_abort', 0)
-        self.set_info('request_pause', 0)
-        self.set_info('request_resume', 0)
-
-    def run(self, filename=None, comments=None, debug=False):
-        """ run the actual scan:
-           Verify, Save original positions,
-           Setup output files and messenger thread,
-           run pre_scan methods
-           Loop over points
-           run post_scan methods
-        """
-        self.dtimer = dtimer = debugtime(verbose=debug)
-
-        self.complete = False
-        if filename is not None:
-            self.filename  = filename
-        if comments is not None:
-            self.comments = comments
-        self.pos_settle_time = max(MIN_POLL_TIME, self.pos_settle_time)
-        self.det_settle_time = max(MIN_POLL_TIME, self.det_settle_time)
-
-        ts_start = time.time()
-        if not self.verify_scan():
-            self.write('Cannot execute scan: %s' % self._scangroup.error_message)
-            self.set_info('scan_message', 'cannot execute scan')
-            return
-
-        self.clear_interrupts()
-        dtimer.add('PRE: cleared interrupts')
-        orig_positions = [p.current() for p in self.positioners]
-
-        out = [p.move_to_start(wait=False) for p in self.positioners]
-        self.check_outputs(out, msg='move to start')
-
-
-        npts = len(self.positioners[0].array)
-        self.message_points = min(100, max(10, 25*round(npts/250.0)))
-        self.dwelltime_varys = False
-        if self.dwelltime is not None:
-            self.min_dwelltime = self.dwelltime
-            self.max_dwelltime = self.dwelltime
-            if isinstance(self.dwelltime, (list, tuple)):
-                self.dwelltime = np.array(self.dwelltime)
-            if isinstance(self.dwelltime, np.ndarray):
-                self.min_dwelltime = min(self.dwelltime)
-                self.max_dwelltime = max(self.dwelltime)
-                self.dwelltime_varys = True
-
-        time_est = npts*(self.pos_settle_time + self.det_settle_time)
-        if self.dwelltime_varys:
-            time_est += self.dwelltime.sum()
-            for d in self.detectors:
-                d.set_dwelltime(self.dwelltime[0])
-        else:
-            time_est += npts*self.dwelltime
-            for d in self.detectors:
-                d.set_dwelltime(self.dwelltime)
-
-        if self.scandb is not None:
-            self.set_info('scan_progress', 'preparing scan')
-
-        dtimer.add('PRE: before pre_scan')
-        out = self.pre_scan()
-        self.check_outputs(out, msg='pre scan')
-        dtimer.add('PRE: pre_scan done')
-
-
-        self.datafile = self.open_output_file(filename=self.filename,
-                                              comments=self.comments)
-
-        dtimer.add('PRE: openend file')
-
-        self.filename =  self.datafile.filename
-        self.clear_data()
-        dtimer.add('PRE: cleared data')
-
-        self.datafile.write_data(breakpoint=0)
-
-        if self.scandb is not None:
-            self.init_scandata()
-            self.set_info('request_abort', 0)
-            self.set_info('scan_time_estimate', time_est)
-            self.set_info('scan_total_points', npts)
-
-        dtimer.add('PRE: wrote data 0')
-        self.set_info('scan_progress', 'starting scan')
-        #self.msg_thread = ScanMessenger(func=self._messenger, npts=npts, cpt=0)
-        # self.msg_thread.start()
-        self.cpt = 0
-        self.npts = npts
-
-        t0 = time.time()
-        out = [p.move_to_start(wait=True) for p in self.positioners]
-        self.check_outputs(out, msg='move to start, wait=True')
-        [p.current() for p in self.positioners]
-        [d.pv.get() for d in self.counters]
-        i = -1
-        ts_init = time.time()
-        self.inittime = ts_init - ts_start
-        dtimer.add('PRE: start scan')
-
-        while not self.abort:
-            i += 1
-            if i >= npts:
-                break
-            try:
-                point_ok = True
-                self.cpt = i+1
-                self.look_for_interrupts()
-                while self.pause:
-                    time.sleep(0.25)
-                    if self.look_for_interrupts():
-                        break
-                # move to next position, wait for moves to finish
-                [p.move_to_pos(i) for p in self.positioners]
-
-                # publish scan data while waiting for move to finish
-                if i > 1:
-                    self.publish_scandata()
-                dtimer.add('Pt %i : publish data' % i)
-                if self.dwelltime_varys:
-                    for d in self.detectors:
-                        d.set_dwelltime(self.dwelltime[i])
-                t0 = time.time()
-                mcount = 0
-                while (not all([p.done for p in self.positioners]) and
-                       time.time() - t0 < self.pos_maxmove_time):
-                    if self.look_for_interrupts():
-                        break
-                    poll(5*MIN_POLL_TIME, 0.25)
-                    mcount += 1
-                # wait for positioners to settle
-                dtimer.add('Pt %i : pos done' % i)
-                # print 'Move completed in %.5f s, %i' % (time.time()-t0, mcount)
-                poll(self.pos_settle_time, 0.25)
-                dtimer.add('Pt %i : pos settled' % i)
-                # start triggers, wait for them to finish
-                [trig.start() for trig in self.triggers]
-                dtimer.add('Pt %i : triggers fired, (%d)' % (i, len(self.triggers)))
-                t0 = time.time()
-                time.sleep(max(0.05, self.min_dwelltime/2.0))
-                while not all([trig.done for trig in self.triggers]):
-                    if (time.time() - t0 > (5.0 + 10*self.max_dwelltime)):
-                        break
-                    poll(MIN_POLL_TIME, 0.1)
-                dtimer.add('Pt %i : triggers done' % i)
-                if self.look_for_interrupts():
-                    break
-                point_ok = (all([trig.done for trig in self.triggers]) and
-                            time.time()-t0 > (0.75*self.min_dwelltime))
-                if not point_ok:
-                    point_ok = True
-                    poll(5*MIN_POLL_TIME, 0.25)
-                    for trig in self.triggers:
-                        point_ok = point_ok and (trig.runtime > (0.75*self.min_dwelltime))
-                        if not point_ok:
-                            print('Trigger problem: ', trig, trig.runtime, self.min_dwelltime)
-
-                # wait, then read read counters and actual positions
-                poll(self.det_settle_time, 0.1)
-                dtimer.add('Pt %i : det settled done.' % i)
-                [c.read() for c in self.counters]
-                dtimer.add('Pt %i : read counters' % i)
-                # self.cdat = [c.buff[-1] for c in self.counters]
-                self.pos_actual.append([p.current() for p in self.positioners])
-                dtimer.add('Pt %i : added positions' % i)
-                # if a messenger exists, let it know this point has finished
-                self._messenger(cpt=self.cpt, npts=npts)
-                dtimer.add('Pt %i : sent message' % i)
-                # if this is a breakpoint, execute those functions
-                if i in self.breakpoints:
-                    self.at_break(breakpoint=i, clear=True)
-                dtimer.add('Pt %i: done.' % i)
-                self.look_for_interrupts()
-
-            except KeyboardInterrupt:
-                self.set_info('request_abort', 1)
-                self.abort = True
-            if not point_ok:
-                self.write('point messed up... try again?')
-                i -= 1
-
-        # scan complete
-        # return to original positions, write data
-        dtimer.add('Post scan start')
-        self.publish_scandata()
-        ts_loop = time.time()
-        self.looptime = ts_loop - ts_init
-
-        for val, pos in zip(orig_positions, self.positioners):
-            pos.move_to(val, wait=False)
-        dtimer.add('Post: return move issued')
-        self.datafile.write_data(breakpoint=-1, close_file=True, clear=False)
-        dtimer.add('Post: file written')
-        if self.look_for_interrupts():
-            self.write("scan aborted at point %i of %i." % (self.cpt, self.npts))
-            raise ScanDBAbort("scan aborted")
-
-        # run post_scan methods
-        self.set_info('scan_progress', 'finishing')
-        out = self.post_scan()
-        self.check_outputs(out, msg='post scan')
-        dtimer.add('Post: post_scan done')
-        self.complete = True
-
-        # end messenger thread
-        # if self.msg_thread is not None:
-        #      self.msg_thread.cpt = None
-        #      self.msg_thread.join()
-
-        self.set_info('scan_progress', 
-                      'scan complete. Wrote %s' % self.datafile.filename)
-        ts_exit = time.time()
-        self.exittime = ts_exit - ts_loop
-        self.runtime  = ts_exit - ts_start
-        dtimer.add('Post: fully done')
-
-        return self.datafile.filename
-        ##
-
-    def write_fastmap_config(self, datafile, comments, mapper='13XRM:map:'):
-        "write ini file for fastmap"
-        if datafile is None: datafile = 'scan.001'
-        if comments is None: comments = ''
-        currscan = 'CurrentScan.ini'
-        server  = self.scandb.get_info('server_fileroot')
-        workdir = self.scandb.get_info('user_folder')
-        basedir = os.path.join(server, workdir, 'Maps')
-        sname = os.path.join(server, workdir, 'Maps', currscan)
-        oname = os.path.join(server, workdir, 'Maps', 'PreviousScan.ini')
-
-        if mapper is not None:
-            caput('%sbasedir'  % mapper, basedir)
-            caput('%sfilename' % mapper, datafile)
-            caput('%sscanfile' % mapper, currscan)
-
-        if os.path.exists(sname):
-            shutil.copy(sname, oname)
-        txt = ['# FastMap configuration file (saved: %s)'%(time.ctime()),
-               '#-------------------------#',  '[scan]',
-               'filename = %s' % datafile,
-               'comments = %s' % comments]
-
-        dim  = len(self.positioners)
-        pos  = self.positioners[0]
-        pospv = str(pos.pv.pvname)
-        if pospv.endswith('.VAL'): pospv = pospv[:-4]
-        arr  = pos.array
-        ltim = self.dwelltime*(len(arr) - 1)
-        txt.append('dimension = %i' % dim)
-        txt.append('pos1 = %s'     % pospv)
-        txt.append('start1 = %.4f' % arr[0])
-        txt.append('stop1 = %.4f'  % arr[-1])
-        txt.append('step1 = %.4f'  % (arr[1]-arr[0]))
-        txt.append('time1 = %.4f'  % ltim)
-
-        if dim > 1:
-            pos = self.positioners[1]
-            pospv = str(pos.pv.pvname)
-            if pospv.endswith('.VAL'): pospv = pospv[:-4]
-            arr = pos.array
-            txt.append('pos2 = %s'   % pospv)
-            txt.append('start2 = %.4f' % arr[0])
-            txt.append('stop2 = %.4f' % arr[-1])
-            txt.append('step2 = %.4f' % (arr[1]-arr[0]))
-
-        txt.append('#------------------#')
-        txt.append('[xrd_ad]')
-        xrd_det = None
-        for det in self.detectors:
-            if isinstance(det, AreaDetector):
-                xrd_det = det
-
-        if xrd_det is None:
-            txt.append('use = False')
-        else:
-            txt.append('use = True')
-            txt.append('type = PEDET1')
-            txt.append('prefix = %s' % det.prefix)
-            txt.append('fileplugin = netCDF1:')
-            # txt.append('fileplugin = %s' % det.file_plugin)
-
-
-        f = open(sname, 'w')
-        f.write('\n'.join(txt))
-        f.close()
-        return sname
-
-    def epics_slewscan(self, filename='map.001', comments=None,
-                       mapper='13XRM:map:'):
-        """ request and what a slew-scan, executed with epics interface
-        and separate fastmap collector....
-        should be replaced!
-        """
-        self.write_fastmap_config(filename, comments, mapper=mapper)
-        caput('%smessage' % mapper, 'starting...')
-        caput('%sStart' % mapper, 1)
-
-        self.clear_interrupts()
-        self.set_info('scan_progress', 'starting')
-        # watch scan
-        # first, wait for scan to start (status == 2)
-        collecting = False
-        t0 = time.time()
-        while not collecting and time.time()-t0 < 120:
-
-            collecting = (2 == caget('%sstatus' % mapper))
-            time.sleep(0.25)
-            if self.look_for_interrupts():
-                break
-        if self.abort:
-            caput("%sAbort" % mapper, 1)
-
-        nrow = 0
-        t0 = time.time()
-        maxrow = caget('%smaxrow' % mapper)
-        info = caget("%sinfo" % mapper, as_string=True)
-        self.set_info('scan_progress', info)
-        #  wait for scan to get past row 1
-        while nrow < 1 and time.time()-t0 < 120:
-            nrow = caget('%snrow' % mapper)
-            time.sleep(0.25)
-            if self.look_for_interrupts():
-                break
-        if self.abort:
-            caput("%sAbort" % mapper, 1)
-
-        maxrow  = caget("%smaxrow" % mapper)
-        time.sleep(1.0)
-        fname  = caget("%sfilename" % mapper, as_string=True)
-        self.set_info('filename', fname)
-
-        # wait for map to finish:
-        # must see "status=Idle" for 10 consequetive seconds
-        collecting_map = True
-        nrowx, nrow = 0, 0
-        t0 = time.time()
-        while collecting_map:
-            time.sleep(0.25)
-            status_val = caget("%sstatus" % mapper)
-            status_str = caget("%sstatus" % mapper, as_string=True)
-            nrow       = caget("%snrow" % mapper)
-            self.set_info('scan_status', status_str)
-            time.sleep(0.25)
-            if self.look_for_interrupts():
-                break
-            if nrowx != nrow:
-                info = caget("%sinfo" % mapper, as_string=True)
-                self.set_info('scan_progress', info)
-                nrowx = nrow
-            if status_val == 0:
-                collecting_map = ((time.time() - t0) < 10.0)
-            else:
-                t0 = time.time()
-
-        # if aborted from ScanDB / ScanGUI wait for status
-        # to go to 0 (or 5 minutes)
-        self.look_for_interrupts()
-        if self.abort:
-            caput('%sAbort' % mapper, 1)
-            time.sleep(0.5)
-            t0 = time.time()
-            status_val = caget('%sstatus' % mapper)
-            while status_val != 0 and (time.time()-t0 < 10.0):
-                time.sleep(0.25)
-                status_val = caget('%sstatus' % mapper)
-
-        status_strg = caget('%sstatus' % mapper, as_string=True)
-        self.set_info('scan_status', status_str)
-        if self.abort:
-            raise ScanDBAbort("slewscan aborted")
-        return
-
-class XAFS_Scan(LarchStepScan):
-    """XAFS Scan"""
-    def __init__(self, label=None, energy_pv=None, read_pv=None,
-                 extra_pvs=None,  e0=0, _larch=None, **kws):
-        self.label = label
-        self.e0 = e0
-        self.energies = []
-        self.regions = []
-        LarchStepScan.__init__(self, _larch=_larch, **kws)
-
-        self.is_qxafs = False
-        self.scantype = 'xafs'
-        self.dwelltime = []
-        self.energy_pos = None
-        self.set_energy_pv(energy_pv, read_pv=read_pv, extra_pvs=extra_pvs)
-
-    def set_energy_pv(self, energy_pv, read_pv=None, extra_pvs=None):
-        self.energy_pv = energy_pv
-        self.read_pv = read_pv
-        if energy_pv is not None:
-            self.energy_pos = Positioner(energy_pv, label='Energy',
-                                         extra_pvs=extra_pvs)
-            self.positioners = []
-            self.add_positioner(self.energy_pos)
-        if read_pv is not None:
-            self.add_counter(read_pv, label='Energy_readback')
-
-    def add_region(self, start, stop, step=None, npts=None,
-                   relative=True, use_k=False, e0=None,
-                   dtime=None, dtime_final=None, dtime_wt=1, min_estep=0.01):
-        """add a region to an EXAFS scan.
-        Note that scans must be added in order of increasing energy
-        """
-        if e0 is None:
-            e0 = self.e0
-        if dtime is None:
-            dtime = self.dtime
-        if min_estep < 0:
-            min_estep = 0.01
-        self.e0 = e0
-        self.dtime = dtime
-
-        if npts is None and step is None:
-            print('add_region needs start, stop, and either step on npts')
-            return
-
-        if step is not None:
-            npts = 1 + int(0.1  + abs(stop - start)/step)
-
-        en_arr = list(np.linspace(start, stop, npts))
-
-        self.regions.append((start, stop, npts, relative, e0,
-                             use_k, dtime, dtime_final, dtime_wt))
-
-        if use_k:
-            en_arr = [e0 + ktoe(v) for v in en_arr]
-        elif relative:
-            en_arr = [e0 +    v    for v in en_arr]
-
-        # check that all energy values in this region are
-        # greater than previously defined regions
-        en_arr.sort()
-        min_energy = min_estep
-        if len(self.energies) > 0:
-            min_energy += max(self.energies)
-        en_arr = [e for e in en_arr if e > min_energy]
-
-        npts   = len(en_arr)
-
-        dt_arr = [dtime]*npts
-        # allow changing counting time linear or by a power law.
-        if dtime_final is not None and dtime_wt > 0:
-            _vtime = (dtime_final-dtime)*(1.0/(npts-1))**dtime_wt
-            dt_arr= [dtime + _vtime *i**dtime_wt for i in range(npts)]
-        self.energies.extend(en_arr)
-        self.dwelltime.extend(dt_arr)
-        if self.energy_pos is not None:
-            self.energy_pos.array = np.array(self.energies)
-
 
 class QXAFS_Scan(XAFS_Scan): # (LarchStepScan):
     """QuickXAFS Scan"""
@@ -1050,7 +219,7 @@ class QXAFS_Scan(XAFS_Scan): # (LarchStepScan):
         qconf = self.scandb.get_config('QXAFS')
         qconf = self.qconf = json.loads(qconf.notes)
 
-        self.xps = XPSTrajectory(qconf['host'], 
+        self.xps = XPSTrajectory(qconf['host'],
                                  user=qconf['user'],
                                  password=qconf['passwd'],
                                  group=qconf['group'],
@@ -1060,7 +229,7 @@ class QXAFS_Scan(XAFS_Scan): # (LarchStepScan):
 
         self.set_energy_pv(energy_pv, read_pv=read_pv, extra_pvs=extra_pvs)
 
-    def make_XPS_trajectory(self, reverse=False, 
+    def make_XPS_trajectory(self, reverse=False,
                             theta_accel=0.25, width_accel=0.25, **kws):
         """this method builds the text of a Trajectory script for
         a Newport XPS Controller based on the energies and dwelltimes"""
@@ -1139,7 +308,7 @@ class QXAFS_Scan(XAFS_Scan): # (LarchStepScan):
         time.sleep(0.1)
 
     def run(self, filename=None, comments=None, debug=False, reverse=False):
-        """ 
+        """
         run the actual QXAFS scan
         """
         print(" QXAFS run!!!! ")
@@ -1165,8 +334,8 @@ class QXAFS_Scan(XAFS_Scan): # (LarchStepScan):
         self.init_qscan(traj)
 
         idarray = 0.001*traj.energy + caget(qconf['id_offset_pv'])
-        
-        # caput(qconf['id_drive_pv'], idarray[0], wait=False)    
+
+        # caput(qconf['id_drive_pv'], idarray[0], wait=False)
         caput(qconf['energy_pv'],  traj.energy[0], wait=False)
 
         self.xps.upload_trajectoryFile(qconf['traj_name'], traj.buffer)
@@ -1188,7 +357,7 @@ class QXAFS_Scan(XAFS_Scan): # (LarchStepScan):
         npulses = len(traj.energy) + 1
 
         caput(qconf['energy_pv'], traj.energy[0], wait=True)
-        # caput(qconf['id_drive_pv'], idarray[0], wait=True, timeout=5.0)    
+        # caput(qconf['id_drive_pv'], idarray[0], wait=True, timeout=5.0)
 
 
         npts = len(self.positioners[0].array)
@@ -1219,7 +388,7 @@ class QXAFS_Scan(XAFS_Scan): # (LarchStepScan):
         out = self.pre_scan()
         self.check_outputs(out, msg='pre scan')
         dtimer.add('PRE: pre_scan done')
-        
+
         self.counters = []
         qxafs_counters = []
         for i, mca in enumerate(sis.mcas):
@@ -1260,7 +429,7 @@ class QXAFS_Scan(XAFS_Scan): # (LarchStepScan):
 
         self.filename =  self.datafile.filename
 
-        dtimer.add('PRE: open datafile')       
+        dtimer.add('PRE: open datafile')
         self.clear_data()
         dtimer.add('PRE: clear data')
         self.datafile.write_data(breakpoint=0)
@@ -1274,9 +443,9 @@ class QXAFS_Scan(XAFS_Scan): # (LarchStepScan):
         self.set_info('scan_total_points', npts)
 
         caput(qconf['energy_pv'], traj.energy[0], wait=True)
-        
+
         time.sleep(0.05)
-        # caput(qconf['id_drive_pv'], idarray[0], wait=True, timeout=5.0)    
+        # caput(qconf['id_drive_pv'], idarray[0], wait=True, timeout=5.0)
 
         dtimer.add('PRE: caputs done')
 
@@ -1303,7 +472,7 @@ class QXAFS_Scan(XAFS_Scan): # (LarchStepScan):
         self.inittime = ts_init - ts_start
         dtimer.add('Start scan:')
         start_time = time.strftime('%Y-%m-%d %H:%M:%S')
-                
+
         dtimer.show()
         self.xps.SetupTrajectory(npts+1, dtime, traj_file=qconf['traj_name'])
 
@@ -1334,7 +503,7 @@ class QXAFS_Scan(XAFS_Scan): # (LarchStepScan):
 
         und_thread.running = False
         und_thread.join()
-        
+
         time.sleep(1.00)
         caput(qconf['energy_pv'], energy_orig-2.0)
 
@@ -1353,7 +522,7 @@ class QXAFS_Scan(XAFS_Scan): # (LarchStepScan):
         print( 'Read Data from SIS: ', narr)
         fout = open(DataFile, 'w')
         obuff =['# Gathered XRF and IO data',
-                '# Scan.start_time: %s' % (start_time), 
+                '# Scan.start_time: %s' % (start_time),
                 '# Scan.end_time: %s' % (time.strftime('%Y-%m-%d %H:%M:%S'))]
 
         for desc, val, addr in extra_vals:
@@ -1376,7 +545,7 @@ class QXAFS_Scan(XAFS_Scan): # (LarchStepScan):
         caput(qconf['energy_pv'], energy_orig, wait=True)
         print( 'Wrote %s' % DataFile)
 
-        ## 
+        ##
         dtimer.add('Post scan start')
         print(" --> Publish Scandata ")
         self.publish_scandata()
@@ -1401,7 +570,7 @@ class QXAFS_Scan(XAFS_Scan): # (LarchStepScan):
         dtimer.add('Post: post_scan done')
         self.complete = True
 
-        self.set_info('scan_progress', 
+        self.set_info('scan_progress',
                       'scan complete. Wrote %s' % self.datafile.filename)
         ts_exit = time.time()
         self.exittime = ts_exit - ts_loop
@@ -1411,33 +580,51 @@ class QXAFS_Scan(XAFS_Scan): # (LarchStepScan):
         return self.datafile.filename
         ##
 
+def get_prescan_function(_larch=None):
+    """find and return pre_scan_command()  script"""
+    prescan = None
+    try:
+        prescan = _larch.symtable.get_symbol('pre_scan_command')
+    except NameError:
+        pass
+    if prescan is not None:
+        if (isinstance(prescan, Group) and
+            hasattr(prescan, 'pre_scan_command')):
+            prescan = prescan.pre_scan_command
+    return prescan
+
 @ValidateLarchPlugin
-def scan_from_json(text, filename='scan.001', current_rois=None, 
-                   is_qxafs=False, _larch=None):
+def scan_from_json(text, filename='scan.001', current_rois=None,
+                   scandb=None, prescan_func=None, is_qxafs=False,
+                   _larch=None, **kws):
     """(PRIVATE)
 
-    creates and returns a LarchStepScan object from a json-text
+    creates and returns a StepScan object from a json-text
     representation.
 
     """
     sdict = json.loads(text)
+    print(" -- SCAN from JSON ", sdict, kws)
+    scanopts = dict(filename=filename,
+                    scandb=scandb,
+                    prescan_func=prescan_func, _larch=_larch)
+    print("  -- scanoopts ", scanopts)
     #
     # create positioners
     if sdict['type'] == 'xafs':
         min_dtime = sdict['dwelltime']
         if isinstance(min_dtime, np.ndarray):
             min_dtime = min(dtime)
-        is_qxafs = (is_qxafs or 
-                    sdict.get('is_qxafs', False) or 
+        is_qxafs = (is_qxafs or
+                    sdict.get('is_qxafs', False) or
                     (min_dtime < 0.45))
-        kwargs = dict(energy_pv=sdict['energy_drive'],
-                      read_pv=sdict['energy_read'],
-                      e0=sdict['e0'], _larch=_larch)
+        scanopts['energy_pv'] = sdict['energy_drive']
+        scanopts['read_pv'] = sdict['energy_read']
+        scanopts['e0v'] = sdict['e0']
 
-        if is_qxafs:
-            scan = QXAFS_Scan(**kwargs)
-        else:
-            scan = XAFS_Scan(**kwargs)
+        _ScanCreator = XAFS_Scan
+        if is_qxafs: _ScanCreator = QXAFS_Scan
+        scan = _ScanCreator(**scanopts)
 
         t_kw  = sdict['time_kw']
         t_max = sdict['max_time']
@@ -1453,7 +640,7 @@ def scan_from_json(text, filename='scan.001', current_rois=None,
                     kws['dtime_wt'] = t_kw
             scan.add_region(start, stop, npts=npts, **kws)
     else:
-        scan = LarchStepScan(filename=filename, _larch=_larch)
+        scan = StepScan(**scanopts)
         if sdict['type'] == 'linear':
             for pos in sdict['positioners']:
                 label, pvs, start, stop, npts = pos
@@ -1501,6 +688,7 @@ def scan_from_json(text, filename='scan.001', current_rois=None,
 
     for dpars in sdict['detectors']:
         dpars['rois'] = rois
+        print("ADD DET ", dpars)
         scan.add_detector(get_detector(**dpars))
 
     # extra counters (not-triggered things to count
@@ -1523,7 +711,7 @@ def scan_from_json(text, filename='scan.001', current_rois=None,
     return scan
 
 @ValidateLarchPlugin
-def scan_from_db(name, filename='scan.001', timeout=5.0, is_qxafs=False, 
+def scan_from_db(name, filename='scan.001', timeout=5.0, is_qxafs=False,
                  _larch=None):
     """(PRIVATE)
 
@@ -1545,9 +733,14 @@ def scan_from_db(name, filename='scan.001', timeout=5.0, is_qxafs=False,
     if scandef is None:
         raise ScanDBException("no scan definition '%s' found" % name)
 
-    return scan_from_json(scandef.text, filename=filename,
+    prescan_func = get_prescan_function(_larch=_larch)
+    return scan_from_json(scandef.text,
+                          filename=filename,
                           is_qxafs=is_qxafs,
-                          current_rois=current_rois, _larch=_larch)
+                          scandb=sdb,
+                          prescan_func=prescan_func,
+                          current_rois=current_rois,
+                          _larch=_larch)
 
 
 @ValidateLarchPlugin
@@ -1681,4 +874,3 @@ def registerLarchPlugin():
                    'get_dbinfo': get_dbinfo}
 
     return (MODNAME, symbols)
-
