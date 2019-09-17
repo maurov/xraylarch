@@ -1,0 +1,38 @@
+#Python environment for running Larch Jupyter examples on mybinder.org
+#Usage: automatically built
+name: larch-mybinder
+channels:
+    - defaults
+dependencies:
+    - python=3.7
+    - pip
+    - nodejs
+    - pyqt=5
+    - wxpython>=4.0.3
+    - numpy>=1.16
+    - scipy>=1.2
+    - matplotlib>=3.0
+    - h5py>=2.8
+    - scikit-image
+    - scikit-learn
+    - sqlalchemy>=0.9
+    - conda-forge::xraylib
+    - pip:
+        - termcolor
+        - pyyaml
+        - peakutils>=1.3
+        - asteval>=0.9
+        - uncertainties>=3.1
+        - pyshortcuts>=1.4
+        - wxmplot>=0.9
+        - wxutils>=0.2
+        - hdf5plugin
+        - silx>=0.11
+        - xraydb
+        - lmfit>=0.9.13
+        - ipywidgets>=7.5
+        - jupyterhub
+        - ipympl
+        - widgetsnbextension
+        - jupyterlab_server
+        - git+https://github.com/xraypy/xraylarch
