@@ -4,9 +4,11 @@ name: larch-mybinder
 channels:
     - defaults
 dependencies:
-    - python=3.7
+    - python=3.6
     - pip
     - nodejs
+    - pyqt=5
+    - wxpython>=4.0.3
     - numpy>=1.16
     - scipy>=1.2
     - matplotlib>=3.0
