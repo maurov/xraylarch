@@ -7,8 +7,6 @@ dependencies:
     - python=3.6
     - pip
     - nodejs
-    - pyqt=5
-    - wxpython>=4.0.3
     - numpy>=1.16
     - scipy>=1.2
     - matplotlib>=3.0
@@ -18,6 +16,8 @@ dependencies:
     - requests
     - sqlalchemy>=0.9
     - conda-forge::xraylib
+    - GSECARS::wxmplot>=0.9
+    - GSECARS::wxutils>=0.2
     - pip:
         - pathlib2
         - termcolor
@@ -27,8 +27,6 @@ dependencies:
         - lmfit>=0.9.13
         - uncertainties>=3.0
         - pyshortcuts>=1.4
-        - wxutils>=0.2.3
-        - wxmplot>=0.9.37
         - hdf5plugin
         - silx>=0.11
         - xraydb
