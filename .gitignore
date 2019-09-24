@@ -31,3 +31,4 @@ AMAP/
 Thumbs.db
 *.egg-info
 *.ipynb_checkpoints
+*.vscode*
