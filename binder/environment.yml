@@ -4,9 +4,11 @@ name: larch-binder
 channels:
     - defaults
 dependencies:
-    - python=3.6
+    - python=3.7
     - pip
     - nodejs
+    - pyqt=5
+    - wxpython>=4.0.3
     - numpy>=1.16
     - scipy>=1.2
     - matplotlib>=3.0
@@ -16,23 +18,31 @@ dependencies:
     - requests
     - sqlalchemy>=0.9
     - conda-forge::xraylib
-    - GSECARS::wxmplot>=0.9
-    - GSECARS::wxutils>=0.2
     - pip:
-        - pathlib2
+        #: utils
         - termcolor
         - pyyaml
+        - palettable
         - peakutils>=1.3
-        - asteval>=0.9.14
-        - lmfit>=0.9.13
-        - uncertainties>=3.0
-        - pyshortcuts>=1.4
-        - hdf5plugin
-        - silx>=0.11
-        - xraydb
+        - asteval>=0.9
+        - uncertainties>=3.1
+        - pyshortcuts>=1.5
+        #: Wx (-> Larch)
+        - wxmplot>=0.9
+        - wxutils>=0.2
+        #: Jupyter
         - jupyterlab_server
         - jupyterlab>=1.0
         - ipywidgets>=7.5
+        - jupyterhub
         - ipympl
-        - widgetsnbextension
+        - widgetsnbextension>=3.5.0
+        #: Base (sci)libs
+        - pandas
+        - xraydb
+        - hdf5plugin
+        - lmfit>=0.9.13
+        - silx>=0.11
+        - http://ftp.esrf.eu/pub/scisoft/shadow3/wheels/shadow3-18.5.30-cp36-cp36m-linux_x86_64.whl; sys_platform == 'linux'
+        #: From source
         - git+https://github.com/xraypy/xraylarch
