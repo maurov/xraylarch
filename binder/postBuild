@@ -4,15 +4,25 @@
 
 # Script automatically run by mybinder.org
 
+# ------------------------
+# COMMON REQUIREMENTS FOR:
+# - jupyter-matplotlib
+# ------------------------
+jupyter labextension install @jupyter-widgets/jupyterlab-manager --no-build
+
 # ---------------------------
 # IPYMPL / JUPYTER-MATPLOTLIB
 # ---------------------------
 # https://github.com/matplotlib/jupyter-matplotlib
-jupyter labextension install @jupyter-widgets/jupyterlab-manager
-jupyter labextension install jupyter-matplotlib
+jupyter labextension install jupyter-matplotlib --no-build
 
 # ---
 # TOC
 # ---
 # https://github.com/jupyterlab/jupyterlab-toc
-jupyter labextension install @jupyterlab/toc
+jupyter labextension install @jupyterlab/toc --no-build
+
+# ----------------------------
+#: Build everything in one run
+# ----------------------------
+jupyter lab build
