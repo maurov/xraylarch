@@ -4,7 +4,7 @@ name: larch-binder
 channels:
     - defaults
 dependencies:
-    - python=3.6
+    - python=3.7
     - pip
     - nodejs
     - pyqt=5
