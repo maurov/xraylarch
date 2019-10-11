@@ -22,6 +22,7 @@ dylibs/*/Mk.install
 dylibs/*/Mk.config
 sandbox/
 tests/.cover
+.pytest_cache*
 play/
 AMAP/
 *.h5
@@ -30,5 +31,5 @@ AMAP/
 .DS_Store
 Thumbs.db
 *.egg-info
-*.ipynb_checkpoints
+*.ipynb_checkpoints*
 *.vscode*
