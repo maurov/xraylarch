@@ -1,0 +1,3 @@
+libxxf86vm1
+libqt5x11extras5
+
