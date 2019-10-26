@@ -1,7 +1,6 @@
 
 from collections import namedtuple
 import json
-
 import numpy as np
 from numpy.linalg import lstsq
 from scipy.optimize import nnls
@@ -11,9 +10,10 @@ from xraydb import (material_mu, mu_elam, ck_probability,
                     xray_edges, xray_lines, xray_line)
 from xraydb.xray import XrayLine
 
+from .. import Group
 from ..math import index_of, interp, savitzky_golay, hypermet, erfc
 from ..xafs import ftwindow
-from ..utils.jsonutils import encode4js, decode4js
+from ..utils import group2dict, json_dump
 
 xrf_prediction = namedtuple("xrf_prediction", ("weights", "prediction"))
 xrf_peak = namedtuple('xrf_peak', ('name', 'amplitude', 'center', 'step', 'tail',
@@ -25,11 +25,21 @@ xrf_peak = namedtuple('xrf_peak', ('name', 'amplitude', 'center', 'step', 'tail'
 #
 # For many XRF Analysis needs, energies are in keV
 ####
+HAS_PINT = False
+def is_pint_quantity(val):
+    return HAS_PINT and isinstance(val, pint.quantity._Quantity)
 
 class XRF_Material:
-    def __init__(self, material='Si', thickness=0.050, efano=None, noise=10.):
+    def __init__(self, material='Si', thickness=0.050, density=None,
+                 efano=None, noise=10., thickness_units='mm'):
         self.material = material
+        self.density = density
+        self.thickness_units = thickness_units
         self.thickness = thickness
+        if HAS_PINT:
+            self.thickness_units = getattr(pint.UnitRegistry(), thickness_units)
+            self.thickness = thickness * self.thickness_units
+
         self.mu_total = self.mu_photo = None
         # note on efano:
         # self.efano = (energy to create e-h pair)  * FanoFactor
@@ -54,8 +64,12 @@ class XRF_Material:
         return np.sqrt(efano*energy + noise**2)
 
     def calc_mu(self, energy):
-        self.mu_total = material_mu(self.material, energy, kind='total')
-        self.mu_photo = material_mu(self.material, energy, kind='photo')
+        self.mu_total = material_mu(self.material, energy,
+                                    density=self.density,
+                                    kind='total')
+        self.mu_photo = material_mu(self.material, energy,
+                                    density=self.density,
+                                    kind='photo')
 
     def absorbance(self, energy, thickness=None, kind='total'):
         """calculate absorbance (fraction absorbed)
@@ -63,7 +77,7 @@ class XRF_Material:
         Arguments
         ----------
         energy      float or ndarray   energy (eV) of X-ray
-        thicknesss  float    material thickness (cm)
+        thicknesss  float or pint.Quantity   material thickness (cm)
 
         Returns
         -------
@@ -76,20 +90,23 @@ class XRF_Material:
         mu = self.mu_total
         if kind == 'photo':
             mu = self.mu_photo
-        return (1.0 - np.exp(-self.thickness*mu))
+        if is_pint_quantity(thickness):
+            t = thickness.to('cm').magnitude
+        else:
+            t = 0.1*thickness
+        return (1.0 - np.exp(-t*mu))
 
-
-    def attenuation(self, energy, thickness=None, kind='total'):
-        """calculate attenuation (fraction attenuated)
+    def transmission(self, energy, thickness=None, kind='total'):
+        """calculate transmission (fraction transmitted through material)
 
         Arguments
-        ----------
+        ---------
         energy      float or ndarray   energy (eV) of X-ray
-        thicknesss  float    material thickness (cm)
+        thicknesss  float or pint.Quantity   material thickness (cm)
 
         Returns
         -------
-        fraction of X-rays attenuated by material
+        fraction of X-rays transmitted through material
         """
 
         if thickness is None:
@@ -99,7 +116,11 @@ class XRF_Material:
         mu = self.mu_total
         if kind == 'photo':
             mu = self.mu_photo
-        return np.exp(-thickness*mu)
+        if is_pint_quantity(thickness):
+            t = thickness.to('cm').magnitude
+        else:
+            t = 0.1*thickness
+        return np.exp(-t*mu)
 
 
 class XRF_Element:
@@ -110,7 +131,6 @@ class XRF_Element:
         self.mu = 1.0
         self.edges = ['K']
         self.fyields = {}
-
         if xray_energy is not None:
             self.mu = mu_elam(symbol, xray_energy, kind='photo')
 
@@ -135,6 +155,7 @@ class XRF_Element:
 
         # apply CK corrections to fluorescent yields
         if 'L3' in self.edges:
+            nlines = 1.0
             ck13 = ck_probability(symbol, 'L1', 'L3')
             ck12 = ck_probability(symbol, 'L1', 'L2')
             ck23 = ck_probability(symbol, 'L2', 'L3')
@@ -142,15 +163,19 @@ class XRF_Element:
             fy2  = self.fyields.get('L2', 0)
             fy1  = self.fyields.get('L1', 0)
             if 'L2' in self.edges:
+                nlines = 2.0
                 fy3 = fy3 + fy2*ck23
                 fy2 = fy2 * (1 - ck23)
                 if 'L1' in self.edges:
+                    nlines = 3.0
                     fy3 = fy3 + fy1 * (ck13 + ck12*ck23)
                     fy2 = fy2 + fy1 * ck12
                     fy1 = fy1 * (1 - ck12 - ck13)
                     self.fyields['L1'] = fy1
                 self.fyields['L2'] = fy2
-            self.fyields['L3'] = fy3
+            self.fyields['L3'] = fy3/nlines
+            self.fyields['L2'] = fy2/nlines
+            self.fyields['L1'] = fy1/nlines
 
         # look up X-ray lines, keep track of very close lines
         # so that they can be consolidate
@@ -172,15 +197,16 @@ class XRF_Element:
             overlap_energy = np.sqrt(1225 + 0.5*xray_energy)
             overlap_energy = 5.0 * int(0.5 + overlap_energy/10.0)
 
-
-        # collect lines that are close in energy
+        # collect lines from the same initial level that are close in energy
         nlines = len(self.lines)
         combos = [[] for k in range(nlines)]
         comboe = [-1 for k in range(nlines)]
+        combol = [None for k in range(nlines)]
         for key, xline in self.lines.items():
             assigned = False
             for i, en in enumerate(comboe):
-                if abs(xline.energy - en) < overlap_energy:
+                if (abs(xline.energy - en) < overlap_energy and
+                    xline.initial_level == combol[i]):
                     combos[i].append(key)
                     assigned = True
                     break
@@ -188,6 +214,7 @@ class XRF_Element:
                 for k in range(nlines):
                     if comboe[k] < 0:
                         break
+                combol[k] = xline.initial_level
                 comboe[k] = xline.energy
                 combos[k].append(key)
 
@@ -215,8 +242,8 @@ class XRF_Element:
                 if len(comps) > 1:
                     newkey = key.replace('1', '').replace('2', '').replace('3', '')
                     newkey = newkey.replace('4', '').replace('5', '').replace(',', '')
-                if newkey not in self.lines:
-                    key = newkey
+                    if newkey not in self.lines:
+                        key = newkey
                 self.lines[key] = XrayLine(energy=(en*wt).sum()/wt.sum(),
                                            intensity=wt.sum(),
                                            initial_level=ilevel,
@@ -234,18 +261,20 @@ class XRF_Model:
       detector      (material, thickness, efano, noise, step, tail, gamma)
     """
     def __init__(self, xray_energy=None, energy_min=1500, energy_max=30000,
-                 count_time=1, bgr=None, **kws):
+                 count_time=1, bgr=None, iter_callback=None, **kws):
 
         self.xray_energy = xray_energy
         self.energy_min = energy_min
         self.energy_max = energy_max
         self.count_time = count_time
+        self.iter_callback = None
         self.params = Parameters()
         self.elements = []
         self.scatter = []
         self.comps = {}
         self.eigenvalues = {}
         self.transfer_matrix = None
+        self.matrix_layers = []
         self.filters = []
         self.fit_iter = 0
         self.fit_toler = 1.e-5
@@ -253,12 +282,12 @@ class XRF_Model:
         self.bgr = None
         self.use_pileup = False
         self.use_escape = False
-
+        self.matrix_atten = None
         self.script = ''
         if bgr is not None:
             self.add_background(bgr)
 
-    def set_detector(self, material='Si', thickness=0.025, efano=None,
+    def set_detector(self, material='Si', thickness=0.40, efano=None,
                      noise=30., peak_step=1e-4, peak_tail=0.01,
                      peak_gamma=0.5, peak_sigmax=1.0, cal_offset=0,
                      cal_slope=10., cal_quad=0, vary_thickness=False,
@@ -278,7 +307,6 @@ class XRF_Model:
         self.params.add('peak_tail', value=peak_tail, vary=vary_peak_tail, min=0, max=10)
         self.params.add('peak_gamma', value=peak_gamma, vary=vary_peak_gamma, min=0)
         self.params.add('peak_sigmax', value=peak_sigmax, vary=vary_peak_sigmax, min=0)
-
 
     def add_scatter_peak(self, name='elastic', amplitude=1000, center=None,
                          step=0.010, tail=0.5, sigmax=1.0, gamma=0.75,
@@ -306,27 +334,33 @@ class XRF_Model:
     def add_element(self, elem, amplitude=1.e6, vary_amplitude=True):
         """add Element to XRF model
         """
-        self.elements.append(XRF_Element(elem,
-                                         xray_energy=self.xray_energy,
+        self.elements.append(XRF_Element(elem, xray_energy=self.xray_energy,
                                          energy_min=self.energy_min))
         self.params.add('amp_%s' % elem.lower(), value=amplitude,
                         vary=vary_amplitude, min=0)
 
-    def add_filter(self, material, thickness, vary_thickness=False):
+    def add_filter(self, material, thickness, density=None, vary_thickness=False):
         self.filters.append(XRF_Material(material=material,
+                                         density=density,
                                          thickness=thickness))
         self.params.add('filterlen_%s' % material,
                         value=thickness, min=0, vary=vary_thickness)
+
+    def add_matrix_layer(self, material, thickness, density=None):
+        self.matrix_layers.append(XRF_Material(material=material,
+                                               density=density,
+                                               thickness=thickness))
+        self.matrix_atten = None
 
     def add_background(self, data, vary=True):
         self.bgr = data
         self.params.add('background_amp', value=1.0, min=0, vary=vary)
 
-    def add_escape(self, scale=0.001, vary=True):
+    def add_escape(self, scale=0.01, vary=True):
         self.use_escape = True
         self.params.add('escape_amp', value=scale, min=0, vary=vary)
 
-    def add_pileup(self, scale=1.0, vary=True):
+    def add_pileup(self, scale=0.01, vary=True):
         self.use_pileup = True
         self.params.add('pileup_amp', value=scale, min=0, vary=vary)
 
@@ -334,11 +368,32 @@ class XRF_Model:
         self.bgr = None
         self.params.pop('background_amp')
 
-    def calc_spectrum(self, energy, params=None, set_init=True):
+    def calc_matrix_attenuation(self, energy):
+        """
+        calculate beam attenuation by a matrix built from layers
+        note that matrix layers and composition cannot be variable
+        so the calculation can be done once, ahead of time.
+
+        Matrix attenuation:
+        For each layer:
+
+        """
+        atten = 1.0
+        if len(self.matrix_layers) > 0:
+            ixray_en = index_of(energy, self.xray_energy)
+            matrix_atten = 0
+            for m in reversed(self.matrix_layers):
+                layer_trans = m.transmission(energy)# transmission through layer
+                incid_trans = layer_trans[ixray_en] # incident beam trans to lower layers
+                incid_absor = 1.0 - incid_trans     # incident beam absorption by layer
+                matrix_atten = layer_trans * (incid_absor + incid_trans + matrix_atten)
+            atten *= matrix_atten
+        self.matrix_atten = atten
+
+    def calc_spectrum(self, energy, params=None):
         if params is None:
             params = self.params
         pars = params.valuesdict()
-        # print("CALC ", pars)
         self.comps = {}
         self.eigenvalues = {}
         efano = pars['det_efano']
@@ -347,13 +402,21 @@ class XRF_Model:
         tail = pars['peak_tail']
         gamma = pars['peak_gamma']
         sigmax = pars['peak_sigmax']
-        # attenuation factor for Detector absorbance and Filters
+
+        # detector attenuation
         atten = self.detector.absorbance(energy, thickness=pars['det_thickness'])
+
+        # filters
         for f in self.filters:
            thickness = pars.get('filterlen_%s' % f.material, None)
-           if thickness is not None:
-               atten *= f.attenuation(energy, thickness=thickness)
+           if thickness is not None and int(thickness*1e6) > 1:
+               atten *= f.transmission(energy, thickness=thickness)
         self.atten = atten
+        # matrix
+        if self.matrix_atten is None:
+            self.calc_matrix_attenuation(energy)
+        atten *= self.matrix_atten
+
         escape_amp = pars.get('escape_amp', 0.0)
         if self.use_escape:
             det_mat = self.detector.material
@@ -409,17 +472,15 @@ class XRF_Model:
         if self.use_pileup:
             pamp = pars.get('pileup_amp', 0.0)
             npts = len(energy)
-            pileup = pamp * 1.e-9*np.convolve(total, total, 'full')[:npts]
+            pileup = pamp * 1.e-8*np.convolve(total, total, 'full')[:npts]
             self.comps['pileup'] = pileup
             self.eigenvalues['pileup'] = pamp
             total += pileup
 
-        # remove tiny values
-        floor = 1.e-12*max(total)
+        # remove tiny values so that log plots are usable
+        floor = 1.e-10*max(total)
         total[np.where(total<floor)] = floor
-
-        if set_init:
-            self.init_fit = total
+        self.current_model = total
         return total
 
     def __resid(self, params, data, index):
@@ -427,8 +488,11 @@ class XRF_Model:
         self.best_en = (pars['cal_offset'] + pars['cal_slope'] * index +
                         pars['cal_quad'] * index**2)
         self.fit_iter += 1
-        self.best_fit = self.calc_spectrum(self.best_en, params=params)
-        return (data - self.best_fit) * self.fit_weight
+        model = self.calc_spectrum(self.best_en, params=params)
+        if callable(self.iter_callback):
+            self.iter_callback(iter=self.fit_iter, pars=pars)
+        return ((data - model) * self.fit_weight)[self.imin:self.imax]
+
 
     def set_fit_weight(self, energy, counts, emin, emax, ewid=25.0):
         """
@@ -436,13 +500,13 @@ class XRF_Model:
         """
         ewin = ftwindow(energy, xmin=emin, xmax=emax, dx=ewid, window='hanning')
         self.fit_window = ewin
-        stderr = 1.0 / np.sqrt(counts + 5)
-        self.fit_weight = ewin * savitzky_golay(stderr, 7, 2)
+        stderr = np.sqrt(counts + 1)
+        self.fit_weight = ewin / (0.1 + savitzky_golay(stderr, 7, 2))
 
     def fit_spectrum(self, energy, counts, energy_min=None, energy_max=None):
         work_energy = 1.0*energy
         work_counts = 1.0*counts
-        floor = 1.e-12*np.percentile(counts, [99])[0]
+        floor = 1.e-10*np.percentile(counts, [99])[0]
         work_counts[np.where(counts<floor)] = floor
 
         if max(energy) < 250.0: # if input energies are in keV
@@ -458,9 +522,18 @@ class XRF_Model:
         if energy_max is not None:
             imax = index_of(work_energy, energy_max)
 
+        self.imin = max(0, imin-5)
+        self.imax = min(len(counts), imax+5)
+        self.npts = (self.imax - self.imin)
         self.set_fit_weight(work_energy, work_counts, energy_min, energy_max)
         self.fit_iter = 0
+        # reset attenuation calcs for matrix, detector, filters
+        self.matrix_atten = None
+        self.detector.mu_total = None
+        for f in self.filters:
+            f.mu_total = None
 
+        self.init_fit = self.calc_spectrum(energy, params=self.params)
         index = np.arange(len(counts))
         userkws = dict(data=work_counts, index=index)
 
@@ -477,10 +550,14 @@ class XRF_Model:
         self.fit_iter += 1
         self.best_fit = self.calc_spectrum(energy, params=self.result.params)
 
+
         # calculate transfer matrix for linear analysis using this model
         tmat= []
         for key, val in self.comps.items():
-            tmat.append(val / self.eigenvalues[key])
+            arr = val / self.eigenvalues[key]
+            floor = 1.e-12*max(arr)
+            arr[np.where(arr<floor)] = 0.0
+            tmat.append(arr)
         self.transfer_matrix = np.array(tmat).transpose()
 
     def apply_model(self, spectrum):
@@ -502,51 +579,47 @@ class XRF_Model:
 
         return xrf_prediction(weights, prediction)
 
-    def save(self, fname=None):
-        """save XRF model and result in a manner that can be loaded later"""
+    def compile_fitresults(self, label='fit result', script='# noscript'):
+        """a simple compilation of fit settings results
+        to be able to easily save and inspect"""
+        out = Group(label=label, script=script)
+        for attr in ('params', 'var_names', 'chisqr', 'redchi', 'nvarys',
+                     'nfev', 'ndata', 'aic', 'bic', 'aborted', 'covar', 'ier',
+                     'message', 'method', 'nfree', 'init_values', 'success',
+                     'residual', 'errorbars', 'lmdif_message', 'nfree'):
+            setattr(out, attr, getattr(self.result, attr))
 
-        result_attrs = ('aborted', 'aic', 'bic', 'chisqr', 'covar',
-                        'errorbars', 'ier', 'init_vals', 'init_values',
-                        'lmdif_message', 'message', 'method', 'ndata',
-                        'nfev', 'nfree', 'nvarys', 'redchi',
-                        'residual', 'success', 'var_names')
-        result = {attr: getattr(self.result, attr) for attr in result_attrs}
-        result['params'] = self.result.params.dumps()
-
-        #
-        elem_attrs = ('all_lines', 'edges', 'fyields', 'lines',
-                      'mu', 'symbol', 'xray_energy')
-        elements = []
-        for el in self.elements:
-            elements.append({attr: getattr(el, attr) for attr in elem_attrs})
-
-
-        mater_attrs = ('efano', 'material', 'mu_photo', 'mu_total',
-                       'noise', 'thickness')
-        detector = {attr: getattr(self.detector, attr) for attr in mater_attrs}
-
-        filters = []
-        for ft in self.filters:
-            filters.append({attr: getattr(ft, attr) for attr in mater_attrs})
-
-
-        out = dict(result=result, elements=elements,
-                   detector=detector, filters=filters,
-                   params=self.params.dumps())
         for attr in ('atten', 'best_en', 'best_fit', 'bgr', 'comps', 'count_time',
                      'eigenvalues', 'energy_max', 'energy_min', 'fit_iter', 'fit_log',
                      'fit_report', 'fit_toler', 'fit_weight', 'fit_window', 'init_fit',
                      'scatter', 'script', 'transfer_matrix', 'xray_energy'):
-            out[attr] = getattr(self, attr)
+            setattr(out, attr, getattr(self, attr))
 
-        out = json.dumps(encode4js(out))
+        elem_attrs = ('all_lines', 'edges', 'fyields', 'lines', 'mu',
+                      'symbol', 'xray_energy')
+        out.elements = []
+        for el in self.elements:
+            out.elements.append({attr: getattr(el, attr) for attr in elem_attrs})
 
+        mater_attrs = ('efano', 'material', 'mu_photo', 'mu_total', 'noise',
+                       'thickness')
+        out.detector = {attr: getattr(self.detector, attr) for attr in mater_attrs}
+        out.filters = []
+        for ft in self.filters:
+            out.filters.append({attr: getattr(ft, attr) for attr in mater_attrs})
+        out.matrix_layers = []
+        for m in self.matrix_layers:
+            out.matrix_layers.append({attr: getattr(m, attr) for attr in mater_attrs})
+        return out
+
+    def save(self, fname=None):
+        """save XRF model and result in a manner that can be loaded later"""
+        result = group2dict(self.compile_fitresults())
+        result['params'] = result.pop('params').dumps()
         if fname is not None:
-            with open(fname, 'w') as fh:
-                fh.write(out)
-                fh.write("\n")
+            json_dump(result, filename=fname)
         else:
-            return out
+            return result
 
     def load(self, s):
         """load a saved XRF model from a string (json)"""
@@ -554,8 +627,7 @@ class XRF_Model:
 
     def export(self, fname):
         """save result to text file"""
-        pass
-
+        result = group2dict(self.compile_fitresults())
 
 
 def xrf_model(xray_energy=None, energy_min=1500, energy_max=None, use_bgr=False, **kws):

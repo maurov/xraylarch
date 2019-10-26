@@ -516,7 +516,7 @@ class GSEXRM_MapFile(object):
         except RuntimeError:
             print("Got Runtime Error ")
             print(sys.exc_info())
-       
+
         self.h5root = None
 
     def add_XRDfiles(self, flip=None, xrdcalfile=None, xrd2dmaskfile=None,
@@ -2338,7 +2338,7 @@ class GSEXRM_MapFile(object):
         env_names = [h5str(a) for a in self.xrmmap['config/environ/name']]
         env_vals  = [h5str(a) for a in self.xrmmap['config/environ/value']]
         for name, val in zip(env_names, env_vals):
-            name = name.lower()
+            name = name.lower().replace('.', ' ')
             if name.startswith('mono energy'):
                 return float(val)
         return None
@@ -2418,9 +2418,9 @@ class GSEXRM_MapFile(object):
                                       dtcorrect=dtcorrect)
         ltime, rtime = self.get_livereal_rect(ymin, ymax, xmin, xmax, det=det,
                                               dtcorrect=dtcorrect)
-        counts = counts[area[ymin:ymax, xmin:xmax]]
         ltime = ltime[area[ymin:ymax, xmin:xmax]].sum()
         rtime = rtime[area[ymin:ymax, xmin:xmax]].sum()
+        counts = counts[area[ymin:ymax, xmin:xmax]]
         while(len(counts.shape) > 1):
             counts = counts.sum(axis=0)
         return self._getmca(dgroup, counts, areaname, npixels=npixels,
@@ -2453,6 +2453,7 @@ class GSEXRM_MapFile(object):
         npix = (ymax-ymin+1)*(xmax-xmin+1)
         ltime, rtime = self.get_livereal_rect(ymin, ymax, xmin, xmax, det=det,
                                               dtcorrect=dtcorrect)
+        counts = counts.sum(axis=0).sum(axis=0)
         return self._getmca(dgroup, counts, name, npixels=npix,
                             real_time=rtime.sum(), live_time=ltime.sum())
 
@@ -2524,7 +2525,7 @@ class GSEXRM_MapFile(object):
                    slope=cal['cal_slope'], **kws)
         if self.incident_energy is None:
             self.incident_energy = self.get_incident_energy()
-        
+
         _mca.incident_energy = 0.001*self.incident_energy
         _mca.energy =  map['energy'].value
         env_names = [h5str(a) for a in self.xrmmap['config/environ/name']]

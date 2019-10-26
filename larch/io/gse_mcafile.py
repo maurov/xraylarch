@@ -108,13 +108,30 @@ class GSEMCA_File(Group):
         --------
           scale   factor to apply to convolution [found from data]
 
-        Outputs 'pileup' attribute containing predicted pileup for each mca
+        the output `pileup` will be the average of the `pileup` for each MCA
+
         """
         pileup = self.mcas[0].counts * 0.0
         for m in self.mcas:
             m.predict_pileup(scale=scale)
             pileup += m.pileup
-        self.pileup = pileup
+        self.pileup = pileup / len(self.mcas)
+
+    def predict_escape(self, fraction=0.01, det='Si'):
+        """predict detector escape, save to `escape` attribute
+
+        Options:
+        --------
+          fraction  escape fraction [0.01]
+          det       detector material ['Si']
+
+        Outputs 'escape' attribute will contain the average `escape` for each MCA
+        """
+        escape = self.mcas[0].counts * 0.0
+        for m in self.mcas:
+            m.predict_escape(fraction=fraction, det=det)
+            escape += m.escape
+        self.escape = escape  / len(self.mcas)
 
     def read(self, filename=None, bad=None):
         """read GSE MCA file"""
@@ -130,6 +147,7 @@ class GSEMCA_File(Group):
         counts     = []
         rois       = []
         environ    = []
+        self.incident_energy = None
         head = self.header = GSEMCA_Header()
         for l in lines:
             l  = l.strip()
@@ -163,6 +181,12 @@ class GSEMCA_File(Group):
                     if desc.startswith('(') and desc.endswith(')'):
                         desc = desc[1:-1]
                     environ.append((desc, val, addr))
+                    if 'mono' in desc.lower() and 'energy' in desc.lower():
+                        try:
+                            val = float(val)
+                        except ValueError:
+                            pass
+                        self.incident_energy = val
                 elif tag[0:4] == 'roi_':
                     iroi, item = tag[4:].split('_')
                     iroi = int(iroi)

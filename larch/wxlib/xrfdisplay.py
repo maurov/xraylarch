@@ -103,7 +103,6 @@ class XRFDisplayFrame(wx.Frame):
             self.larch = self.larch_buffer.larchshell
             self.init_larch()
 
-        self._mcagroup = self.larch.symtable.new_group('_mcas')
         self.exit_callback = exit_callback
         self.roi_patch = None
         self.selected_roi = None
@@ -146,8 +145,6 @@ class XRFDisplayFrame(wx.Frame):
             self.statusbar.SetStatusText(statusbar_fields[i], i)
         if mca_file is not None:
             self.mca = gsemca_group(mca_file, _larch=self.larch)
-            self._mcagroup.mca1 = self.mca
-            self._mcagroup.mca2 = None
             self.plotmca(self.mca, show_mca2=False)
 
     def ignoreEvent(self, event=None):
@@ -356,9 +353,9 @@ class XRFDisplayFrame(wx.Frame):
         zsizer.Add(z3,    0, wx.EXPAND|wx.ALL, 0)
         pack(roibtns, zsizer)
 
-        rt1 = txt(roipanel, ' Channels:', size=75, font=Font10)
-        rt2 = txt(roipanel, ' Energy:',   size=75, font=Font10)
-        rt3 = txt(roipanel, ' Cen/Wid:',  size=75, font=Font10)
+        rt1 = txt(roipanel, ' Channels:', size=80, font=Font10)
+        rt2 = txt(roipanel, ' Energy:',   size=80, font=Font10)
+        rt3 = txt(roipanel, ' Cen, Wid:',  size=80, font=Font10)
         m = ''
         self.wids['roi_msg1'] = txt(roipanel, m, size=135, font=Font10)
         self.wids['roi_msg2'] = txt(roipanel, m, size=135, font=Font10)
@@ -692,9 +689,9 @@ class XRFDisplayFrame(wx.Frame):
         self.ShowROIStatus(left, right, name=name)
         self.ShowROIPatch(left, right)
 
-        roi_msg1 = '[{:} : {:}]'.format(left, right)
-        roi_msg2 = '[{:6.3f} : {:6.3f}]'.format(elo, ehi)
-        roi_msg3 = ' {:6.3f} / {:6.3f} '.format((elo+ehi)/2., (ehi - elo))
+        roi_msg1 = '[{:}:{:}]'.format(left, right)
+        roi_msg2 = '[{:6.3f}:{:6.3f}]'.format(elo, ehi)
+        roi_msg3 = '{:6.3f}, {:6.3f}'.format((elo+ehi)/2., (ehi - elo))
 
         self.energy_for_zoom = (elo+ehi)/2.0
 
@@ -781,6 +778,9 @@ class XRFDisplayFrame(wx.Frame):
         ix = amenu.Append(-1, "Show Pileup Prediction",
                           "Show Pileup Prediction", kind=wx.ITEM_CHECK)
         self.Bind(wx.EVT_MENU, self.onPileupPrediction, ix)
+        ix = amenu.Append(-1, "Show Escape Prediction",
+                          "Show Escape Prediction", kind=wx.ITEM_CHECK)
+        self.Bind(wx.EVT_MENU, self.onEscapePrediction, ix)
         MenuItem(self, amenu, "&Calibrate Energy\tCtrl+E",
                  "Calibrate Energy",  self.onCalibrateEnergy)
         MenuItem(self, amenu, "Fit Spectrum\tCtrl+F",
@@ -1017,9 +1017,19 @@ class XRFDisplayFrame(wx.Frame):
     def onPileupPrediction(self, event=None):
         if event.IsChecked():
             self.mca.predict_pileup()
-            self.oplot(self.mca.energy, self.mca.pileup, label='pileup prediction')
+            self.oplot(self.mca.energy, self.mca.pileup,
+                       color='#555555', label='pileup prediction')
         else:
             self.plotmca(self.mca)
+
+    def onEscapePrediction(self, event=None):
+        if event.IsChecked():
+            self.mca.predict_escape()
+            self.oplot(self.mca.energy, self.mca.escape,
+                       color='#F07030', label='escape prediction')
+        else:
+            self.plotmca(self.mca)
+
 
     def onYAxis(self, event=None):
         self.show_yaxis = self.wids['show_yaxis'].IsChecked()
@@ -1059,10 +1069,10 @@ class XRFDisplayFrame(wx.Frame):
     def plotmca(self, mca, title=None, set_title=True, as_mca2=False,
                 fullrange=False, init=False, **kws):
         if as_mca2:
-            self._mcagroup.mca2 = self.mca2 = mca
+            self.mca2 = mca
             kws['new'] = False
         else:
-            self._mcagroup.mca1 = self.mca = mca
+            self.mca = mca
             self.panel.conf.show_grid = False
         xview_range = self.panel.axes.get_xlim()
 
@@ -1245,9 +1255,6 @@ class XRFDisplayFrame(wx.Frame):
             self.mca2 = copy.deepcopy(self.mca)
 
         self.mca = gsemca_group(fnew, _larch=self.larch)
-
-        setattr(self._mcagroup, 'mca1', self.mca)
-        setattr(self._mcagroup, 'mca2', self.mca2)
         self.plotmca(self.mca, show_mca2=True)
 
     def onReadGSEXRMFile(self, event=None, **kws):
@@ -1314,7 +1321,7 @@ class XRFDisplayFrame(wx.Frame):
         try:
             self.win_fit.Raise()
         except:
-            self.win_fit = FitSpectraFrame(self, mca='mca1')
+            self.win_fit = FitSpectraFrame(self)
 
     def write_message(self, s, panel=0):
         """write a message to the Status Bar"""
