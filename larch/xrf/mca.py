@@ -10,7 +10,7 @@ Authors/Modifications:
 import numpy as np
 from larch import Group, isgroup
 
-from xraydb import xray_line
+from xraydb import xray_line, xray_edge, material_mu
 from ..math import interp
 from .deadtime import calc_icr, correction_factor
 from .roi import ROI
@@ -96,7 +96,7 @@ class MCA(Group):
     ###############################################################################
     def __init__(self, counts=None, nchans=2048, start_time='',
                  offset=0, slope=0, quad=0, name='mca', dt_factor=1,
-                 real_time=0, live_time = 0, input_counts=0, tau=0, **kws):
+                 real_time=0, live_time=0, input_counts=0, tau=0, **kws):
 
         self.name    = name
         self.nchans  = nchans
@@ -181,27 +181,39 @@ class MCA(Group):
         en = self.energy
         npts = len(en)
         counts = self.counts.astype(int)*1.0
-        pileup = np.convolve(counts/en.sum(), counts/en.sum(), 'full')[:npts]
+        pileup = 1.e-8*np.convolve(counts, counts, 'full')[:npts]
         ex = en[0] + np.arange(len(pileup))*(en[1] - en[0])
         if scale is None:
             npts = len(en)
             nhalf = int(npts/2) + 1
             nmost = int(7*npts/8.0) - 1
             scale = self.counts[nhalf:].sum()/ pileup[nhalf:nmost].sum()
-
         self.pileup = interp(ex, scale*pileup, self.energy, kind='cubic')
         self.pileup_scale = scale
 
-    def predict_escape(self, fraction=0.01, det='Si'):
+    def predict_escape(self, det='Si', scale=1.0):
         """
         predict detector escape for a spectrum, save to 'escape' attribute
+
+        X-rays penetrate a depth 1/mu(material, energy) and the
+        detector fluorescence escapes from that depth as
+            exp(-mu(material, KaEnergy)*thickness)
+        with a fluorecence yield of the material
+
         """
-        fluor_en = 0.001 * xray_line(det, 'Ka').energy
-        self.escape = fraction * interp(self.energy - fluor_en,
-                                        self.counts*1.0,
-                                        self.energy, kind='cubic')
-        high_en = self.energy[-1] - 1.5*fluor_en
-        self.escape[np.where(self.energy > high_en)] = 0.
+        fluor_en = xray_line(det, 'Ka').energy/1000.0
+        edge = xray_edge(det, 'K')
+
+        # here we use the 1/e depth for the emission
+        # and the 1/e depth of the incident beam:
+        # the detector fluorescence can escape on either side
+        mu_emit  = material_mu(det, fluor_en*1000)
+        mu_input = material_mu(det, self.energy*1000)
+        escape   = 0.5*scale*edge.fyield * np.exp(-mu_emit / (2*mu_input))
+        escape[np.where(self.energy*1000 < edge.energy)] = 0.0
+        escape *= interp(self.energy - fluor_en, self.counts*1.0,
+                         self.energy, kind='cubic')
+        self.escape = escape
 
     def update_correction(self, tau=None):
         """
