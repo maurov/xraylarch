@@ -9,20 +9,17 @@ dependencies:
     - python == 3.7
     - pip
     - nodejs
-    - wxpython >= 4.0.4  # with conda because still not fully working with pip!
+    - GSECARS::xraylarch >= 0.9.46
     - pip:
-        - -r ../requirements.txt
-        - -r ../requirements-dev.txt
-        - ipython>=7.10
-        - ipykernel>=5.1
+        - ipython >= 7.10
+        - ipykernel >= 5.1
         - jupyterlab_server
-        - jupyterlab>=1.0
-        - ipywidgets>=7.5
+        - jupyterlab >= 1.0
+        - ipywidgets >= 7.5
         - notebook
         - jupyterhub
         - ipympl
         - nbsphinx
-        - widgetsnbextension>=3.5.0
-        - git+https://github.com/xraypy/xraylarch.git
+        - widgetsnbextension >= 3.5.0
 
 #: -> run 'postBuild' script to complete install of Jupyter extensions (NOTE: automatically run on binderhub)
