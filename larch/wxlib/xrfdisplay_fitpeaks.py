@@ -40,7 +40,8 @@ from larch import Group
 from ..xrf import xrf_background, MCA, FanoFactors
 from ..utils.jsonutils import encode4js, decode4js
 
-from .xrfdisplay_utils import XRFGROUP, mcaname
+from .xrfdisplay_utils import (XRFGROUP, mcaname, XRFRESULTS_GROUP,
+                               MAKE_XRFRESULTS_GROUP)
 
 def read_filterdata(flist, _larch):
     """ read filters data"""
@@ -74,10 +75,6 @@ EFano_Text = 'Peak Widths:  sigma = sqrt(E_Fano * Energy + Noise**2) '
 Geom_Text = 'Angles in degrees: 90=normal to surface, 0=grazing surface'
 Energy_Text = 'All energies in keV'
 
-mca_init = """
-if not hasattr({group:s}, 'fit_history'): {group:s}.fit_history = []
-"""
-
 xrfmod_setup = """## Set up XRF Model
 _xrfmodel = xrf_model(xray_energy={en_xray:.2f}, count_time={count_time:.5f},
                       energy_min={en_min:.2f}, energy_max={en_max:.2f})
@@ -96,22 +93,17 @@ xrfmod_scattpeak = """_xrfmodel.add_scatter_peak(name='{peakname:s}', center={_c
                 sigmax={_sigma:.5f},  vary_center={vcen:s}, vary_step={vstep:s},
                 vary_tail={vtail:s}, vary_beta={vbeta:s}, vary_sigmax={vsigma:s})"""
 
-xrfmod_fitscript = """_xrfmodel.fit_spectrum({group:s}.energy, {group:s}.counts,
-                energy_min={emin:.2f}, energy_max={emax:.2f})
-_xrfresult = _xrfmodel.compile_fitresults()
+xrfmod_fitscript = """
+_xrffitresult = _xrfmodel.fit_spectrum({group:s}, energy_min={emin:.2f}, energy_max={emax:.2f})
+_xrfresults.insert(0, _xrffitresult)
 """
 
 xrfmod_filter = "_xrfmodel.add_filter('{name:s}', {thick:.5f}, vary_thickness={vary:s})"
 xrfmod_matrix = "_xrfmodel.set_matrix('{name:s}', {thick:.5f}, density={density:.5f})"
-
-xrfmod_jsondump  = """# save xrf model to json
-_o = copy(group2dict({group:s}.fit_history[{nfit:d}]))
-_o['params'] = _o.pop('params').dumps()
-json_dump(_o, '{filename:s}')
-"""
-
 xrfmod_pileup = "_xrfmodel.add_pileup(scale={scale:.3f}, vary={vary:s})"
 xrfmod_escape = "_xrfmodel.add_escape(scale={scale:.3f}, vary={vary:s})"
+
+xrfmod_savejs = "_xrfresults[{nfit:d}].save('{filename:s}')"
 
 xrfmod_elems = """
 for atsym in {elemlist:s}:
@@ -123,16 +115,19 @@ Filter_Lengths = ['microns', 'mm', 'cm']
 Filter_Materials = ['None', 'air', 'nitrogen', 'helium', 'kapton',
                     'beryllium', 'aluminum', 'mylar', 'pmma']
 
-
 class FitSpectraFrame(wx.Frame):
     """Frame for Spectral Analysis"""
 
     def __init__(self, parent, size=(700, 825)):
         self.parent = parent
         self._larch = parent.larch
-
+        symtable = self._larch.symtable
         # fetch current spectra from parent
-        xrfgroup = self._larch.symtable.get_group(XRFGROUP)
+        if not symtable.has_group(XRFRESULTS_GROUP):
+            self._larch.eval(MAKE_XRFRESULTS_GROUP)
+
+        self.xrfresults = symtable.get_symbol(XRFRESULTS_GROUP)
+        xrfgroup = symtable.get_group(XRFGROUP)
         mcagroup = getattr(xrfgroup, '_mca')
         self.mca = getattr(xrfgroup, mcagroup)
         self.mcagroup = '%s.%s' % (XRFGROUP, mcagroup)
@@ -144,8 +139,6 @@ class FitSpectraFrame(wx.Frame):
         if self.mca.incident_energy > 250:
             self.mca.incident_energy /= 1000.0
 
-        self._larch.eval(mca_init.format(group=self.mcagroup))
-        self.fit_history = getattr(self.mca, 'fit_history', [])
         self.nfit = 0
         self.colors = GUIColors()
         wx.Frame.__init__(self, parent, -1, 'Fit XRF Spectra',
@@ -155,29 +148,18 @@ class FitSpectraFrame(wx.Frame):
         self.owids = {}
 
         pan = GridPanel(self)
-        mca_groups = []
-        mca_default = 0
-        for attr in dir(xrfgroup):
-            if attr.startswith('mca'):
-                obj = getattr(xrfgroup, attr)
-                label = getattr(obj, 'label', '')
-                if hasattr(obj, 'counts') and label is not None and len(label) > 1:
-                    mca_groups.append(label)
-                    if attr == self.mcagroup:
-                        mca_default = len(mca_groups)-1
+        mca_label = getattr(self.mca, 'label', None)
+        if mca_label is None:
+            mca_label = getattr(self.mca, 'filename', 'mca')
 
-
-        self.wids['mca_choice'] = Choice(pan, choices=mca_groups, size=(400, -1),
-                                         default=mca_default)
-        #                                 action=self.onDetMaterial)
-
+        self.wids['mca_name'] = SimpleText(pan, mca_label, size=(300, -1), style=LEFT)
         self.wids['btn_calc'] = Button(pan, 'Calculate Model', size=(150, -1),
                                        action=self.onShowModel)
         self.wids['btn_fit'] = Button(pan, 'Fit Model', size=(150, -1),
                                        action=self.onFitModel)
 
         pan.AddText("  XRF Spectrum: ", colour='#880000')
-        pan.Add(self.wids['mca_choice'], dcol=3)
+        pan.Add(self.wids['mca_name'], dcol=3)
         pan.Add(self.wids['btn_calc'], newrow=True)
         pan.Add(self.wids['btn_fit'])
 
@@ -414,6 +396,9 @@ class FitSpectraFrame(wx.Frame):
         wids['det_dist'] = FloatSpin(pdet, value=50, **opts)
         wids['det_area'] = FloatSpin(pdet, value=50, **opts)
 
+        for notyet in ('angle_in', 'angle_out', 'det_dist', 'det_area',
+                       'flux_in'):
+            wids[notyet].Disable()
 
         pdet.AddText(' Beam Energy, Fit Range :', colour='#880000', dcol=2)
         pdet.AddText('   X-ray Energy (keV): ', newrow=True)
@@ -446,18 +431,6 @@ class FitSpectraFrame(wx.Frame):
         pdet.Add(wids['det_noise'])
         pdet.Add(wids['det_noise_vary'], dcol=2)
 
-        addLine(pdet)
-        pdet.AddText(' Geometry:', colour='#880000', dcol=1, newrow=True)
-        pdet.AddText(Geom_Text, dcol=3)
-        pdet.AddText('   Incident Angle (deg):', newrow=True)
-        pdet.Add(wids['angle_in'])
-        pdet.AddText('   Exit Angle (deg):', newrow=False)
-        pdet.Add(wids['angle_out'])
-        pdet.AddText('   Detector Distance (mm): ', newrow=True)
-        pdet.Add(wids['det_dist'])
-        pdet.AddText('   Detector Area (mm^2): ', newrow=False)
-        pdet.Add(wids['det_area'])
-
 
         addLine(pdet)
         pdet.AddText(' Escape && Pileup:', colour='#880000', dcol=2, newrow=True)
@@ -470,6 +443,19 @@ class FitSpectraFrame(wx.Frame):
         pdet.Add(wids['pileup_amp'])
         pdet.Add(wids['pileup_amp_vary'])
         pdet.Add(wids['pileup_use'], dcol=3)
+
+        addLine(pdet)
+        pdet.AddText(' Geometry:', colour='#880000', dcol=1, newrow=True)
+        pdet.AddText(Geom_Text, dcol=3)
+        pdet.AddText('   Incident Angle (deg):', newrow=True)
+        pdet.Add(wids['angle_in'])
+        pdet.AddText('   Exit Angle (deg):', newrow=False)
+        pdet.Add(wids['angle_out'])
+        pdet.AddText('   Detector Distance (mm): ', newrow=True)
+        pdet.Add(wids['det_dist'])
+        pdet.AddText('   Detector Area (mm^2): ', newrow=False)
+        pdet.Add(wids['det_area'])
+
 
         addLine(pdet)
         pdet.pack()
@@ -512,7 +498,8 @@ class FitSpectraFrame(wx.Frame):
 
         pan.Add(HLine(pan, size=(650, 3)), dcol=6, newrow=True)
 
-        pan.AddText(' Matrix:', colour='#880000', dcol=2, newrow=True)
+        pan.AddText(' Matrix:', colour='#880000', newrow=True)
+        pan.AddText('    NOTE: thin film limit only',  dcol=3)
 
         wids['matrix_mat'] = wx.TextCtrl(pan, value='', size=(275, -1))
         wids['matrix_thk'] = FloatSpin(pan, value=0.0, **opts)
@@ -536,6 +523,7 @@ class FitSpectraFrame(wx.Frame):
         mview = self.owids['materials'] = dv.DataViewListCtrl(pan, style=DVSTYLE)
         mview.Bind(dv.EVT_DATAVIEW_SELECTION_CHANGED, self.onSelectMaterial)
         self.selected_material = ''
+
 
         mview.AppendTextColumn('Name',      width=150)
         mview.AppendTextColumn('Formula',   width=325)
@@ -568,6 +556,11 @@ class FitSpectraFrame(wx.Frame):
         self.owids['newmat_name'] = wx.TextCtrl(pan, value='', size=(175, -1))
         self.owids['newmat_dens'] = FloatSpin(pan, value=1.0, **opts)
         self.owids['newmat_form'] = wx.TextCtrl(pan, value='', size=(400, -1))
+
+
+        for notyet in ('matrix_mat', 'matrix_thk', 'matrix_den',
+                       'matrix_btn'):
+            wids[notyet].Disable()
 
         pan.AddText(' Name:', newrow=True)
         pan.Add(self.owids['newmat_name'])
@@ -719,8 +712,8 @@ class FitSpectraFrame(wx.Frame):
 
         irow += 1
         sizer.Add(cview, (irow, 0), (1, 5), LCEN)
-
         pack(panel, sizer)
+        panel.SetMinSize((675, 725))
         panel.SetupScrolling()
         return panel
 
@@ -748,19 +741,19 @@ class FitSpectraFrame(wx.Frame):
             this.Sortable = True
             this.Alignment = this.Renderer.Alignment = align
 
-        cview.SetMinSize((675, 400))
+        cview.SetMinSize((675, 500))
         wids['comp_fitlabel'] = Choice(panel, choices=[''], size=(175, -1),
                                        action=self.onCompSelectFit)
 
         self.compscale_lock = 0.0
-        wids['comp_elemchoice'] = Choice(panel, choices=[''], size=(100, -1),
-                                         action=self.onCompSetElemAbundance)
-        wids['comp_elemscale'] = FloatSpin(panel, value=1.0, digits=6, min_val=0,
+        wids['comp_elemchoice'] = Choice(panel, choices=[''], size=(100, -1))
+        # action=self.onCompSetElemAbundance)
+        wids['comp_elemscale'] = FloatSpin(panel, value=1.0, digits=5, min_val=0,
                                            increment=0.01,
                                            action=self.onCompSetElemAbundance)
         wids['comp_units'] = Choice(panel, choices=CompositionUnits, size=(100, -1))
-        wids['comp_scalevalue'] = FloatCtrl(panel, value=0, size=(200, -1),
-                                            action=self.onCompSetScale)
+        wids['comp_scale'] = FloatCtrl(panel, value=0, size=(200, -1), precision=5,
+                                       minval=0, action=self.onCompSetScale)
 
         wids['comp_save'] = Button(panel, 'Save This Concentration Data',
                                    size=(200, -1), action=self.onCompSave)
@@ -781,7 +774,7 @@ class FitSpectraFrame(wx.Frame):
 
         irow += 1
         sizer.Add(SimpleText(panel, 'Scaling Factor:'), (irow, 0), (1, 1), LCEN)
-        sizer.Add(wids['comp_scalevalue'],              (irow, 1), (1, 3), LCEN)
+        sizer.Add(wids['comp_scale'],              (irow, 1), (1, 3), LCEN)
 
         irow += 1
         sizer.Add(wids['composition'],   (irow, 0), (3, 6), LCEN)
@@ -790,11 +783,12 @@ class FitSpectraFrame(wx.Frame):
         sizer.Add(wids['comp_save'],   (irow, 0), (1, 3), LCEN)
 
         pack(panel, sizer)
+        panel.SetMinSize((675, 750))
         panel.SetupScrolling()
         return panel
 
     def onCompSetScale(self, event=None, value=None):
-        if len(self.fit_history) < 1 or (time.time() - self.compscale_lock) < 0.25:
+        if len(self.xrfresults) < 1 or (time.time() - self.compscale_lock) < 0.25:
             return
         self.compscale_lock = time.time()
         owids = self.owids
@@ -808,11 +802,11 @@ class FitSpectraFrame(wx.Frame):
                 conc_vals[elem] = [par.value, par.stderr]
 
         try:
-            scale = self.owids['comp_scalevalue'].GetValue()
+            scale = self.owids['comp_scale'].GetValue()
         except:
             return
 
-        owids['comp_elemscale'].SetValue(conc_vals[cur_elem][0]/scale)
+        owids['comp_elemscale'].SetValue(conc_vals[cur_elem][0]*scale)
         owids['composition'].DeleteAllItems()
         result.concentration_results = conc_vals
         result.concentration_scale = scale
@@ -821,8 +815,8 @@ class FitSpectraFrame(wx.Frame):
             zat = "%d" % atomic_number(elem)
             val, serr = dat
             rval = "%15.4f" % val
-            sval = "%15.4f" % (val/scale)
-            uval = "%15.4f" % (serr/scale)
+            sval = "%15.4f" % (val*scale)
+            uval = "%15.4f" % (serr*scale)
             try:
                 uval = uval + ' ({:.2%})'.format(abs(serr/val))
             except ZeroDivisionError:
@@ -830,7 +824,7 @@ class FitSpectraFrame(wx.Frame):
             owids['composition'].AppendItem((zat, elem, rval, sval, uval))
 
     def onCompSetElemAbundance(self, event=None, value=None):
-        if len(self.fit_history) < 1 or (time.time() - self.compscale_lock) < 0.25:
+        if len(self.xrfresults) < 1  or (time.time() - self.compscale_lock) < 0.25:
             return
         self.compscale_lock = time.time()
         owids = self.owids
@@ -844,17 +838,18 @@ class FitSpectraFrame(wx.Frame):
                 conc_vals[elem] = [par.value, par.stderr]
 
         result.concentration_results = conc_vals
+        elem_value = owids['comp_elemscale'].GetValue()
 
-        scale = conc_vals[cur_elem][0]/owids['comp_elemscale'].GetValue()
+        scale = elem_value/conc_vals[cur_elem][0]
         result.concentration_scale = scale
-        owids['comp_scalevalue'].SetValue(scale)
+        owids['comp_scale'].SetValue(scale)
         owids['composition'].DeleteAllItems()
         for elem, dat in conc_vals.items():
             zat = "%d" % atomic_number(elem)
             val, serr = dat
             rval = "%15.4f" % val
-            sval = "%15.4f" % (val/scale)
-            uval = "%15.4f" % (serr/scale)
+            sval = "%15.4f" % (val*scale)
+            uval = "%15.4f" % (serr*scale)
             try:
                 uval = uval + ' ({:.2%})'.format(abs(serr/val))
             except ZeroDivisionError:
@@ -893,7 +888,6 @@ class FitSpectraFrame(wx.Frame):
             with open(sfile, 'w') as fh:
                 fh.write('\n'.join(buff))
 
-
     def onCompSelectFit(self, event=None):
         result = self.get_fitresult(nfit=self.owids['comp_fitlabel'].GetSelection())
         cur_elem  = self.owids['comp_elemchoice'].GetStringSelection()
@@ -907,12 +901,12 @@ class FitSpectraFrame(wx.Frame):
         self.onCompSetElemAbundance()
 
     def UpdateCompositionPage(self, event=None):
-        self.fit_history = getattr(self.mca, 'fit_history', [])
-        if len(self.fit_history) > 0:
+        self.xrfresults = self._larch.symtable.get_symbol(XRFRESULTS_GROUP)
+        if len(self.xrfresults) > 0:
             result = self.get_fitresult()
             fitlab = self.owids['comp_fitlabel']
             fitlab.Clear()
-            fitlab.SetChoices([a.label for a in self.fit_history])
+            fitlab.SetChoices([a.label for a in self.xrfresults])
             fitlab.SetStringSelection(result.label)
             self.onCompSelectFit()
 
@@ -1096,6 +1090,7 @@ class FitSpectraFrame(wx.Frame):
         vars = {'Vary':'True', 'Fix': 'False', 'True':True, 'False': False}
         opts = {}
         for key, wid in self.wids.items():
+            val = None
             if hasattr(wid, 'GetValue'):
                 val = wid.GetValue()
             elif hasattr(wid, 'IsChecked'):
@@ -1104,8 +1099,8 @@ class FitSpectraFrame(wx.Frame):
                 val = wid.GetStringSelection()
             elif hasattr(wid, 'GetStringSelection'):
                 val = wid.GetStringSelection()
-            else:
-                opts[key] = '????'
+            elif hasattr(wid, 'GetLabel'):
+                val = wid.GetLabel()
             if isinstance(val, str) and val.title() in vars:
                 val = vars[val.title()]
             opts[key] = val
@@ -1249,14 +1244,11 @@ class FitSpectraFrame(wx.Frame):
 
         self._larch.eval(fit_script)
         dgroup = self._larch.symtable.get_group(self.mcagroup)
-        xrfresult = self._larch.symtable.get_symbol('_xrfresult')
+        self.xrfresults = self._larch.symtable.get_symbol(XRFRESULTS_GROUP)
 
+        xrfresult = self.xrfresults[0]
         xrfresult.script = "%s\n%s" % (self.model_script, fit_script)
-        xrfresult.label = "fit %d" % (1+len(dgroup.fit_history))
-
-        append_hist = "{group:s}.fit_history.append(_xrfresult)"
-        self._larch.eval(append_hist.format(group=self.mcagroup))
-
+        xrfresult.label = "fit %d" % (len(self.xrfresults))
         self.plot_model(init=True, with_comps=True)
         for i in range(len(self.nb.pagelist)):
             if self.nb.GetPageText(i).strip().startswith('Fit R'):
@@ -1270,14 +1262,14 @@ class FitSpectraFrame(wx.Frame):
     def onSaveFitResult(self, event=None):
         result = self.get_fitresult()
         deffile = self.mca.label + '_' + result.label
-        deffile = fix_filename(deffile.replace('.', '_')) + '_xrf.modl'
-        ModelWcards = "XRF Models(*.modl)|*.modl|All files (*.*)|*.*"
+        deffile = fix_filename(deffile.replace('.', '_')) + '.xrfmodel'
+        ModelWcards = "XRF Models(*.xrfmodel)|*.xrfmodel|All files (*.*)|*.*"
         sfile = FileSave(self, 'Save XRF Model', default_file=deffile,
                          wildcard=ModelWcards)
         if sfile is not None:
-            self._larch.eval(xrfmod_jsondump.format(group=self.mcagroup,
-                                                    nfit=self.nfit,
-                                                    filename=sfile))
+            self._larch.eval(xrfmod_savejs.format(group=self.mcagroup,
+                                                  nfit=self.nfit,
+                                                  filename=sfile))
 
     def onExportFitResult(self, event=None):
         result = self.get_fitresult()
@@ -1323,11 +1315,11 @@ class FitSpectraFrame(wx.Frame):
     def get_fitresult(self, nfit=None):
         if nfit is None:
             nfit = self.nfit
-        self.fit_history = getattr(self.mca, 'fit_history', [])
+
+        self.xrfresults = self._larch.symtable.get_symbol(XRFRESULTS_GROUP)
         self.nfit = max(0, nfit)
-        if self.nfit > len(self.fit_history):
-            self.nfit = 0
-        return self.fit_history[self.nfit]
+        self.nfit = min(self.nfit, len(self.xrfresults)-1)
+        return self.xrfresults[self.nfit]
 
     def onChangeFitLabel(self, event=None):
         label = self.owids['fitlabel_txt'].GetValue()
@@ -1399,7 +1391,7 @@ class FitSpectraFrame(wx.Frame):
     def show_results(self):
         cur = self.get_fitresult()
         self.owids['stats'].DeleteAllItems()
-        for i, res in enumerate(self.fit_history):
+        for i, res in enumerate(self.xrfresults):
             args = [res.label]
             for attr in ('nvarys', 'nfev', 'chisqr', 'redchi', 'aic'):
                 val = getattr(res, attr)

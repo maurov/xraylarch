@@ -2,8 +2,7 @@
 XAFS: Post-edge Background Subtraction
 ==============================================
 
-.. module:: _xafs
-
+.. :noindex: module:: larch.xafs
 
 Background subtraction is one of the most important data processing steps
 in EXAFS analysis, converting the measured :math:`\mu(E)` into the
@@ -306,7 +305,6 @@ using all the default inputs would be:
 
 with the resulting outputs looking like this:
 
-
 .. subfigstart::
 
 .. _fig_xafs2a:
@@ -316,7 +314,7 @@ with the resulting outputs looking like this:
     :width: 100%
     :align: center
 
-    Cu metal: :math:`\mu(E)` and background :math:`\mu_0(E)`
+    :math:`\mu(E)` and background :math:`\mu_0(E)`
 
 .. _fig_xafs2b:
 
@@ -329,8 +327,7 @@ with the resulting outputs looking like this:
 
 .. subfigend::
     :width: 0.45
-    :alt: a fig
-    :label: fig_xafs2
+    :label: fig-xafs2
 
     Example of simple usage of :func:`autobk` for Cu metal.
 
@@ -368,6 +365,7 @@ The resulting outputs looks OK:
     :label: fig-xafs3
 
     Example usage of :func:`autobk` for :math:`\rm FeAsO4 \cdot (nH_2O)`.
+
 
 A close examimation of :math:`k^2\chi(k)` suggests we might be able to do
 better, which brings us to the next section.

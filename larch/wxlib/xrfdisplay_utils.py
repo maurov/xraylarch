@@ -10,7 +10,7 @@ import numpy as np
 
 import wx
 import wx.lib.colourselect  as csel
-
+import wx.lib.scrolledpanel as scrolled
 from wxutils import (SimpleText, FloatCtrl, Choice, Font, pack, Button,
                      Check, HyperText, HLine, GridPanel, CEN, LEFT, RIGHT)
 
@@ -20,9 +20,23 @@ from ..xrf import (xrf_calib_fitrois, xrf_calib_init_roi,
                    xrf_calib_compute, xrf_calib_apply)
 
 # Group used to hold MCA data
-XRFGROUP = '_xrfdata'
+XRFGROUP   = '_xrfdata'
+MAKE_XRFGROUP_CMD = "%s = group(__doc__='MCA/XRF data groups', _mca='', _mca2='')" % XRFGROUP
+XRFRESULTS_GROUP   = '_xrfresults'
+MAKE_XRFRESULTS_GROUP = "_xrfresults = []"
+
 def mcaname(i):
     return "mca{:03d}".format(i)
+
+def next_mcaname(_larch):
+    xrfgroup = _larch.symtable.get_group(XRFGROUP)
+    i, exists = 1, True
+    name = "mca{:03d}".format(i)
+    while hasattr(xrfgroup, name):
+        i += 1
+        name = "mca{:03d}".format(i)
+    return name
+
 
 class XRFCalibrationFrame(wx.Frame):
     def __init__(self, parent, mca, size=(-1, -1), callback=None):
@@ -31,7 +45,9 @@ class XRFCalibrationFrame(wx.Frame):
         wx.Frame.__init__(self, parent, -1, 'Calibrate MCA',
                           size=size, style=wx.DEFAULT_FRAME_STYLE)
 
-        panel = GridPanel(self)
+        opanel = scrolled.ScrolledPanel(self)
+        osizer = wx.BoxSizer(wx.VERTICAL)
+        panel = GridPanel(opanel)
         self.calib_updated = False
         panel.AddText("Calibrate MCA Energy (Energies in eV)",
                       colour='#880000', dcol=7)
@@ -116,14 +132,15 @@ class XRFCalibrationFrame(wx.Frame):
         panel.Add(Button(panel, 'Use New Calibration',
                          size=(175, -1), action=self.onUseCalib),
                   dcol=3, style=RIGHT)
-
         panel.Add(Button(panel, 'Done',
                          size=(125, -1), action=self.onClose),
                   dcol=2, style=RIGHT)
-
         panel.pack()
         a = panel.GetBestSize()
         self.SetSize((a[0]+25, a[1]+50))
+        osizer.Add(panel)
+        pack(opanel, osizer)
+        opanel.SetupScrolling()
         self.Show()
         self.Raise()
         self.init_proc = False
@@ -246,13 +263,11 @@ class ColorsFrame(wx.Frame):
             c.Bind(csel.EVT_COLOURSELECT, partial(self.onColor, item=name))
             return c
 
-        SX = 130
         def scolor(txt, attr, **kws):
-            panel.AddText(txt, size=(SX, -1), style=LEFT, font=Font(11), **kws)
+            panel.AddText(txt, size=(130, -1), style=LEFT, font=Font(11), **kws)
             panel.Add(add_color(panel, attr),  style=LEFT)
 
         panel.AddText('    XRF Display Colors', dcol=4, colour='#880000')
-
         panel.Add(HLine(panel, size=(400, 3)),  dcol=4, newrow=True)
         scolor(' Main Spectra:',        'spectra_color', newrow=True)
         scolor(' Background Spectra:',      'spectra2_color')

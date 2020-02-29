@@ -43,7 +43,7 @@ from .periodictable import PeriodicTablePanel
 
 from .xrfdisplay_utils import (XRFCalibrationFrame, ColorsFrame,
                                XrayLinesFrame, XRFDisplayConfig, XRFGROUP,
-                               mcaname)
+                               MAKE_XRFGROUP_CMD, next_mcaname)
 
 from .xrfdisplay_fitpeaks import FitSpectraFrame
 
@@ -55,7 +55,6 @@ has already been read.
 
 ICON_FILE = 'ptable.ico'
 
-make_xrfgroup = "%s = group(__doc__='MCA spectra data groups for XRF Display', _mca='', _mca2='')" % XRFGROUP
 read_mcafile = "# {group:s}.{name:s} = read_gsemca('{filename:s}')"
 
 def txt(panel, label, size=75, colour=None, font=None, style=None):
@@ -77,7 +76,7 @@ class XRFDisplayFrame(wx.Frame):
   Matt Newville <newville @ cars.uchicago.edu>
   """
     main_title = 'XRF Display'
-    def __init__(self, _larch=None, parent=None, mca_file=None,
+    def __init__(self, _larch=None, parent=None, filename=None,
                  size=(725, 450), axissize=None, axisbg=None,
                  title='XRF Display', exit_callback=None,
                  output_title='XRF', **kws):
@@ -146,8 +145,8 @@ class XRFDisplayFrame(wx.Frame):
         statusbar_fields = ["XRF Display", " ", " ", " "]
         for i in range(len(statusbar_fields)):
             self.statusbar.SetStatusText(statusbar_fields[i], i)
-        if mca_file is not None:
-            self.add_mca(GSEMCA_File(mca_file), filename=mca_file, plot=True)
+        if filename is not None:
+            self.add_mca(GSEMCA_File(filename), filename=filename, plot=True)
 
 
     def ignoreEvent(self, event=None):
@@ -480,7 +479,7 @@ class XRFDisplayFrame(wx.Frame):
             symtab.set_symbol('_sys.wx.parent', self)
 
         if not symtab.has_group(XRFGROUP):
-            self.larch.eval(make_xrfgroup)
+            self.larch.eval(MAKE_XRFGROUP_CMD)
 
         fico = os.path.join(icondir, ICON_FILE)
         try:
@@ -496,24 +495,22 @@ class XRFDisplayFrame(wx.Frame):
             self.mca = mca
 
         xrfgroup = self.larch.symtable.get_group(XRFGROUP)
-        group_exists = True
-        while group_exists:
-            self.mca_index += 1
-            name = mcaname(self.mca_index)
-            group_exists = hasattr(xrfgroup, name)
-
+        mcaname = next_mcaname(self.larch)
         if filename is not None:
             self.larch.eval(read_mcafile.format(group=XRFGROUP,
-                                                name=name, filename=filename))
+                                                name=mcaname,
+                                                filename=filename))
             if label is None:
                 label = filename
+        if label is None and mca.filename is not None:
+            label = mca.filename
         if label is None:
-            label = name
+            label = mcaname
         self.mca.label = label
         # push mca to mca2, save id of this mca
         setattr(xrfgroup, '_mca2', getattr(xrfgroup, '_mca', ''))
-        setattr(xrfgroup, '_mca', name)
-        setattr(xrfgroup, name, mca)
+        setattr(xrfgroup, '_mca', mcaname)
+        setattr(xrfgroup, mcaname, mca)
         if plot:
             self.plotmca(self.mca)
             if as_mca2:
@@ -777,8 +774,7 @@ class XRFDisplayFrame(wx.Frame):
         MenuItem(self, fmenu, "&Print\tCtrl+P", "Print Plot", self.onPrint)
 
         fmenu.AppendSeparator()
-        MenuItem(self, fmenu, "&Quit\tCtrl+Q",
-                  "Quit program", self.onExit)
+        MenuItem(self, fmenu, "&Quit\tCtrl+Q", "Quit program", self.onClose)
 
         omenu = wx.Menu()
         MenuItem(self, omenu, "Configure Colors",
@@ -832,7 +828,7 @@ class XRFDisplayFrame(wx.Frame):
         for menu, title in self._menus:
             self.menubar.Append(menu, title)
         self.SetMenuBar(self.menubar)
-        self.Bind(wx.EVT_CLOSE, self.onExit)
+        self.Bind(wx.EVT_CLOSE, self.onClose)
 
     def onShowLarchBuffer(self, evt=None):
         if self.larch_buffer is not None:
@@ -859,7 +855,7 @@ class XRFDisplayFrame(wx.Frame):
         if self.panel is not None:
             self.panel.Print(event=event)
 
-    def onExit(self, event=None):
+    def onClose(self, event=None):
         try:
             if callable(self.exit_callback):
                 self.exit_callback()
@@ -873,12 +869,12 @@ class XRFDisplayFrame(wx.Frame):
         except:
             pass
 
+        if hasattr(self.larch.symtable, '_plotter'):
+            wx.CallAfter(self.larch.symtable._plotter.close_all_displays)
+
         for name, wid in self.subframes.items():
-            if wid is not None:
-                try:
-                    wid.Destroy()
-                except:
-                    pass
+            if hasattr(wid, 'Destroy'):
+                wx.CallAfter(wid.Destroy)
         self.Destroy()
 
     def config_colors(self, event=None):
@@ -1285,17 +1281,17 @@ class XRFDisplayFrame(wx.Frame):
                             wildcard=FILE_WILDCARDS,
                             style = wx.FD_OPEN|wx.FD_CHANGE_DIR)
 
-        mca_file = None
+        filename = None
         if dlg.ShowModal() == wx.ID_OK:
-            mca_file = os.path.abspath(dlg.GetPath())
+            filename = os.path.abspath(dlg.GetPath())
         dlg.Destroy()
 
-        if mca_file is None:
+        if filename is None:
             return
         if self.mca is not None:
             self.mca2 = copy.deepcopy(self.mca)
 
-        self.add_mca(GSEMCA_File(mca_file), filename=mca_file)
+        self.add_mca(GSEMCA_File(filename), filename=filename)
 
     def onSaveMCAFile(self, event=None, **kws):
         deffile = ''
@@ -1393,17 +1389,13 @@ class XRFDisplayFrame(wx.Frame):
                 return
 
 class XRFApp(wx.App, wx.lib.mixins.inspection.InspectionMixin):
-    def __init__(self, mca_file=None, **kws):
-        self.mca_file = mca_file
+    def __init__(self, filename=None, **kws):
+        self.filename = filename
         wx.App.__init__(self)
 
     def OnInit(self):
         self.Init()
-        frame = XRFDisplayFrame(mca_file=self.mca_file) #
+        frame = XRFDisplayFrame(filename=self.filename)
         frame.Show()
         self.SetTopWindow(frame)
         return True
-
-
-if __name__ == "__main__":
-    XRFApp().MainLoop()
