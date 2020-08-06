@@ -29,7 +29,7 @@ dependencies:
         - pytest
         - termcolor
         - hdf5plugin >= 2.1
-        - fabio >= 0.7
+        - fabio >= 0.9
         - pyfai
         - six
         - silx >= 0.12
