@@ -34,16 +34,16 @@ from wxutils import (SimpleText, EditableListBox, Font, pack, Popup,
 
 from ..math import index_of
 from ..utils import bytes2str, debugtime
-from ..io import GSEMCA_File, gsemca_group
+from ..io import GSEMCA_File
 from ..site_config import icondir
 from ..interpreter import Interpreter
 
 from .larchframe import LarchFrame
 from .periodictable import PeriodicTablePanel
-from .xrfdisplay_utils import (XRFCalibrationFrame,
-                               ColorsFrame,
-                               XrayLinesFrame,
-                               XRFDisplayConfig)
+
+from .xrfdisplay_utils import (XRFCalibrationFrame, ColorsFrame,
+                               XrayLinesFrame, XRFDisplayConfig, XRFGROUP,
+                               MAKE_XRFGROUP_CMD, next_mcaname)
 
 from .xrfdisplay_fitpeaks import FitSpectraFrame
 
@@ -54,6 +54,8 @@ has already been read.
 """
 
 ICON_FILE = 'ptable.ico'
+
+read_mcafile = "# {group:s}.{name:s} = read_gsemca('{filename:s}')"
 
 def txt(panel, label, size=75, colour=None, font=None, style=None):
     if style is None:
@@ -74,7 +76,7 @@ class XRFDisplayFrame(wx.Frame):
   Matt Newville <newville @ cars.uchicago.edu>
   """
     main_title = 'XRF Display'
-    def __init__(self, _larch=None, parent=None, mca_file=None,
+    def __init__(self, _larch=None, parent=None, filename=None,
                  size=(725, 450), axissize=None, axisbg=None,
                  title='XRF Display', exit_callback=None,
                  output_title='XRF', **kws):
@@ -83,7 +85,6 @@ class XRFDisplayFrame(wx.Frame):
         wx.Frame.__init__(self, parent=parent,
                           title=title, size=size,  **kws)
         self.conf = XRFDisplayConfig()
-
         self.subframes = {}
         self.data = None
         self.title = title
@@ -91,7 +92,7 @@ class XRFDisplayFrame(wx.Frame):
         self.wids = {}
         self.larch = _larch
         if isinstance(self.larch, Interpreter):  # called from shell
-            pass
+            self.larch_buffer = None
         else:
             self.larch_buffer = parent
             if not isinstance(parent, LarchFrame):
@@ -100,8 +101,9 @@ class XRFDisplayFrame(wx.Frame):
                 self.larch_buffer.Show()
                 self.larch_buffer.Raise()
                 self.larch_buffer.Hide()
+                self.subframes['larchframe'] = self.larch_buffer
             self.larch = self.larch_buffer.larchshell
-            self.init_larch()
+        self.init_larch()
 
         self.exit_callback = exit_callback
         self.roi_patch = None
@@ -110,12 +112,12 @@ class XRFDisplayFrame(wx.Frame):
         self.selected_elem = None
         self.mca = None
         self.mca2 = None
-        self.xdata = np.arange(2048)*0.015
+        self.xdata = np.arange(2048)*0.01
         self.ydata = np.ones(2048)*1.e-4
         self.x2data = None
         self.y2data = None
         self.rois_shown = False
-        # self.show_pileup = False
+        self.mca_index = 0
         self.major_markers = []
         self.minor_markers = []
         self.hold_markers = []
@@ -143,9 +145,9 @@ class XRFDisplayFrame(wx.Frame):
         statusbar_fields = ["XRF Display", " ", " ", " "]
         for i in range(len(statusbar_fields)):
             self.statusbar.SetStatusText(statusbar_fields[i], i)
-        if mca_file is not None:
-            self.mca = gsemca_group(mca_file, _larch=self.larch)
-            self.plotmca(self.mca, show_mca2=False)
+        if filename is not None:
+            self.add_mca(GSEMCA_File(filename), filename=filename, plot=True)
+
 
     def ignoreEvent(self, event=None):
         pass
@@ -300,8 +302,8 @@ class XRFDisplayFrame(wx.Frame):
                                     fontsize=9)
         self.wids['ptable'] = ptable
 
-        labstyle = wx.ALIGN_LEFT|wx.ALIGN_BOTTOM|wx.EXPAND
-        ctrlstyle = wx.ALIGN_LEFT|wx.ALIGN_BOTTOM
+        labstyle = wx.ALIGN_LEFT|wx.EXPAND
+        ctrlstyle = wx.ALIGN_LEFT
         txtstyle=wx.ALIGN_LEFT|wx.ST_NO_AUTORESIZE|wx.TE_PROCESS_ENTER
         Font9  = Font(9)
         Font10 = Font(10)
@@ -388,7 +390,7 @@ class XRFDisplayFrame(wx.Frame):
         yaxis  = Check(yscalepanel, ' Show Y Scale ', action=self.onYAxis,
                       default=False)
         self.wids['show_yaxis'] = yaxis
-        ysizer.Add(ytitle,  0, wx.ALIGN_CENTER_VERTICAL|wx.ALL, 0)
+        ysizer.Add(ytitle,  0, wx.ALL, 0)
         ysizer.Add(ylog,    0, wx.EXPAND|wx.ALL, 0)
         ysizer.Add(yspace,  0, wx.EXPAND|wx.ALL, 0)
         ysizer.Add(yaxis,   0, wx.EXPAND|wx.ALL, 0)
@@ -436,15 +438,15 @@ class XRFDisplayFrame(wx.Frame):
         sizer = wx.BoxSizer(wx.VERTICAL)
         sizer.Add(roipanel,            0, labstyle)
         sizer.Add(lin(ctrlpanel, 195), 0, labstyle)
-        sizer.Add(yscalepanel,         0, wx.ALIGN_RIGHT|wx.EXPAND|wx.ALL)
-        sizer.Add(zoompanel,           0, wx.ALIGN_RIGHT|wx.EXPAND|wx.ALL)
+        sizer.Add(yscalepanel,         0, wx.EXPAND|wx.ALL)
+        sizer.Add(zoompanel,           0, wx.EXPAND|wx.ALL)
         sizer.Add(lin(ctrlpanel, 195), 0, labstyle)
-        sizer.Add(ptable,              0, wx.ALIGN_RIGHT|wx.EXPAND|wx.ALL, 4)
+        sizer.Add(ptable,              0, wx.EXPAND|wx.ALL, 4)
         sizer.Add(arrowpanel,          0, labstyle)
         sizer.Add(lin(ctrlpanel, 195), 0, labstyle)
 
         if self.wids['xray_lines'] is not None:
-            sizer.Add(xlines,  0, wx.ALIGN_CENTER|wx.GROW|wx.ALL|wx.EXPAND)
+            sizer.Add(xlines,  0, wx.GROW|wx.ALL|wx.EXPAND)
 
         pack(ctrlpanel, sizer)
         return ctrlpanel
@@ -476,11 +478,43 @@ class XRFDisplayFrame(wx.Frame):
         if not symtab.has_symbol('_sys.wx.parent'):
             symtab.set_symbol('_sys.wx.parent', self)
 
+        if not symtab.has_group(XRFGROUP):
+            self.larch.eval(MAKE_XRFGROUP_CMD)
+
         fico = os.path.join(icondir, ICON_FILE)
         try:
             self.SetIcon(wx.Icon(fico, wx.BITMAP_TYPE_ICO))
         except:
             pass
+
+    def add_mca(self, mca, filename=None, label=None, as_mca2=False, plot=True):
+        if as_mca2:
+            self.mca2 = mca
+        else:
+            self.mca2 = self.mca
+            self.mca = mca
+
+        xrfgroup = self.larch.symtable.get_group(XRFGROUP)
+        mcaname = next_mcaname(self.larch)
+        if filename is not None:
+            self.larch.eval(read_mcafile.format(group=XRFGROUP,
+                                                name=mcaname,
+                                                filename=filename))
+            if label is None:
+                label = filename
+        if label is None and mca.filename is not None:
+            label = mca.filename
+        if label is None:
+            label = mcaname
+        self.mca.label = label
+        # push mca to mca2, save id of this mca
+        setattr(xrfgroup, '_mca2', getattr(xrfgroup, '_mca', ''))
+        setattr(xrfgroup, '_mca', mcaname)
+        setattr(xrfgroup, mcaname, mca)
+        if plot:
+            self.plotmca(self.mca)
+            if as_mca2:
+                self.plotmca(self.mca, as_mca2=True)
 
     def _getlims(self):
         emin, emax = self.panel.axes.get_xlim()
@@ -716,19 +750,17 @@ class XRFDisplayFrame(wx.Frame):
         MenuItem(self, fmenu, "&Read MCA Spectra File\tCtrl+O",
                  "Read GSECARS MCA File",  self.onReadMCAFile)
 
-        fmenu.AppendSeparator()
         MenuItem(self, fmenu, "&Save MCA File\tCtrl+S",
                  "Save GSECARS MCA File",  self.onSaveMCAFile)
         MenuItem(self, fmenu, "&Save ASCII Column File\tCtrl+A",
                  "Save Column File",  self.onSaveColumnFile)
 
         fmenu.AppendSeparator()
-        MenuItem(self, fmenu, "Save ROIs to File",
-                 "Save ROIs to File",  self.onSaveROIs)
-        MenuItem(self, fmenu, "Restore ROIs File",
-                 "Read ROIs from File",  self.onRestoreROIs)
-
-        fmenu.AppendSeparator()
+        # MenuItem(self, fmenu, "Save ROIs to File",
+        #         "Save ROIs to File",  self.onSaveROIs)
+        # MenuItem(self, fmenu, "Restore ROIs File",
+        #         "Read ROIs from File",  self.onRestoreROIs)
+        # fmenu.AppendSeparator()
         MenuItem(self, fmenu, 'Show Larch Buffer\tCtrl+L',
                  'Show Larch Programming Buffer',
                  self.onShowLarchBuffer)
@@ -742,8 +774,7 @@ class XRFDisplayFrame(wx.Frame):
         MenuItem(self, fmenu, "&Print\tCtrl+P", "Print Plot", self.onPrint)
 
         fmenu.AppendSeparator()
-        MenuItem(self, fmenu, "&Quit\tCtrl+Q",
-                  "Quit program", self.onExit)
+        MenuItem(self, fmenu, "&Quit\tCtrl+Q", "Quit program", self.onClose)
 
         omenu = wx.Menu()
         MenuItem(self, omenu, "Configure Colors",
@@ -756,7 +787,7 @@ class XRFDisplayFrame(wx.Frame):
                  "Zoom out to full data range", self.unzoom_all)
         MenuItem(self, omenu, "Toggle Grid\tCtrl+G",
                  "Toggle Grid Display", self.toggle_grid)
-        MenuItem(self, omenu,  "Toggle Plot legend\tCtrl+L",
+        MenuItem(self, omenu,  "Toggle Plot legend",
                  "Toggle Plot Legend", self.onToggleLegend)
         omenu.AppendSeparator()
         MenuItem(self, omenu, "Hide X-ray Lines",
@@ -775,12 +806,12 @@ class XRFDisplayFrame(wx.Frame):
                  "Close Background MCA", self.close_bkg_mca)
 
         amenu = wx.Menu()
-        ix = amenu.Append(-1, "Show Pileup Prediction",
-                          "Show Pileup Prediction", kind=wx.ITEM_CHECK)
-        self.Bind(wx.EVT_MENU, self.onPileupPrediction, ix)
-        ix = amenu.Append(-1, "Show Escape Prediction",
-                          "Show Escape Prediction", kind=wx.ITEM_CHECK)
-        self.Bind(wx.EVT_MENU, self.onEscapePrediction, ix)
+        MenuItem(self, amenu, "Show Pileup Prediction",
+                 "Show Pileup Prediction", kind=wx.ITEM_CHECK,
+                 checked=False, action=self.onPileupPrediction)
+        MenuItem(self, amenu, "Show Escape Prediction",
+                 "Show Escape Prediction", kind=wx.ITEM_CHECK,
+                 checked=False, action=self.onEscapePrediction)
         MenuItem(self, amenu, "&Calibrate Energy\tCtrl+E",
                  "Calibrate Energy",  self.onCalibrateEnergy)
         MenuItem(self, amenu, "Fit Spectrum\tCtrl+F",
@@ -797,13 +828,12 @@ class XRFDisplayFrame(wx.Frame):
         for menu, title in self._menus:
             self.menubar.Append(menu, title)
         self.SetMenuBar(self.menubar)
-        self.Bind(wx.EVT_CLOSE, self.onExit)
+        self.Bind(wx.EVT_CLOSE, self.onClose)
 
     def onShowLarchBuffer(self, evt=None):
-        if self.larch_buffer is None:
-            self.larch_buffer = LarchFrame(_larch=self.larch, is_standalone=False)
-        self.larch_buffer.Show()
-        self.larch_buffer.Raise()
+        if self.larch_buffer is not None:
+            self.larch_buffer.Show()
+            self.larch_buffer.Raise()
 
     def onSavePNG(self, event=None):
         if self.panel is not None:
@@ -825,7 +855,7 @@ class XRFDisplayFrame(wx.Frame):
         if self.panel is not None:
             self.panel.Print(event=event)
 
-    def onExit(self, event=None):
+    def onClose(self, event=None):
         try:
             if callable(self.exit_callback):
                 self.exit_callback()
@@ -839,11 +869,13 @@ class XRFDisplayFrame(wx.Frame):
         except:
             pass
 
+        if hasattr(self.larch.symtable, '_plotter'):
+            wx.CallAfter(self.larch.symtable._plotter.close_all_displays)
 
-        try:
-            self.Destroy()
-        except:
-            pass
+        for name, wid in self.subframes.items():
+            if hasattr(wid, 'Destroy'):
+                wx.CallAfter(wid.Destroy)
+        self.Destroy()
 
     def config_colors(self, event=None):
         """show configuration frame"""
@@ -1018,7 +1050,7 @@ class XRFDisplayFrame(wx.Frame):
         if event.IsChecked():
             self.mca.predict_pileup()
             self.oplot(self.mca.energy, self.mca.pileup,
-                       color='#555555', label='pileup prediction')
+                       color=self.conf.pileup_color, label='pileup prediction')
         else:
             self.plotmca(self.mca)
 
@@ -1026,7 +1058,7 @@ class XRFDisplayFrame(wx.Frame):
         if event.IsChecked():
             self.mca.predict_escape()
             self.oplot(self.mca.energy, self.mca.escape,
-                       color='#F07030', label='escape prediction')
+                       color=self.conf.escape_color, label='escape prediction')
         else:
             self.plotmca(self.mca)
 
@@ -1083,13 +1115,13 @@ class XRFDisplayFrame(wx.Frame):
 
         atitles = []
         if self.mca is not None:
-            if hasattr(self.mca, 'title'):
+            if getattr(self.mca, 'title', None) is not None:
                 atitles.append(bytes2str(self.mca.title))
-            if hasattr(self.mca, 'filename'):
+            if getattr(self.mca, 'filename', None) is not None:
                 atitles.append(" File={:s}".format(self.mca.filename))
-            if hasattr(self.mca, 'npixels'):
+            if getattr(self.mca, 'npixels', None) is not None:
                 atitles.append(" {:.0f} Pixels".format(self.mca.npixels))
-            if hasattr(self.mca, 'real_time'):
+            if getattr(self.mca, 'real_time', None) is not None:
                 try:
                     rtime_str = " RealTime={:.2f} sec".format(self.mca.real_time)
                 except ValueError:
@@ -1102,11 +1134,11 @@ class XRFDisplayFrame(wx.Frame):
             except ValueError:
                 pass
         if as_mca2:
-            if hasattr(self.mca2, 'title'):
+            if getattr(self.mca2, 'title', None) is not None:
                 atitles.append(" BG={:s}".format(self.mca2.title))
-            elif  hasattr(self.mca2, 'filename'):
+            elif getattr(self.mca2, 'filename', None) is not None:
                 atitles.append(" BG_File={:s}".format(self.mca2.filename))
-            if hasattr(self.mca, 'real_time'):
+            if getattr(self.mca, 'real_time', None) is not None:
                 atitles.append(" BG_RealTime={:.2f} sec".format(self.mca2.real_time))
 
             self.oplot(self.mca2.energy, self.mca2.counts,
@@ -1147,14 +1179,13 @@ class XRFDisplayFrame(wx.Frame):
 
         panel.plot(x, ydat, label='spectrum',  **kwargs)
         if with_rois and mca is not None:
-            xnpts = 1.0/len(self.mca.energy)
             if not self.rois_shown:
                 self.set_roilist(mca=mca)
             yroi = -1.0*np.ones(len(y))
+            max_width = 0.5*len(self.mca.energy) # suppress very large ROIs
             for r in mca.rois:
-                if (r.left, r.right) in ((0, 0), (-1, -1)):
-                    continue
-                if xnpts*(r.right - r.left) > 0.5: # suppress very large ROIs
+                if ((r.left, r.right) in ((0, 0), (-1, -1)) or
+                    (r.right - r.left) > max_width):
                     continue
                 yroi[r.left:r.right] = y[r.left:r.right]
             yroi = np.ma.masked_less(yroi, 0)
@@ -1229,13 +1260,20 @@ class XRFDisplayFrame(wx.Frame):
         if self.mca2 is None:
             return
         self.mca, self.mca2 = self.mca2, self.mca
+        xrfgroup = self.larch.symtable.get_group(XRFGROUP)
+        _mca = getattr(xrfgroup, '_mca', '')
+        _mca2 = getattr(xrfgroup, '_mca2', '')
+        setattr(xrfgroup, '_mca2', _mca)
+        setattr(xrfgroup, '_mca', _mca2)
+
         self.plotmca(self.mca)
         self.plotmca(self.mca2, as_mca2=True)
 
     def close_bkg_mca(self, event=None):
         self.mca2 = None
+        xrfgroup = self.larch.symtable.get_group(XRFGROUP)
+        setattr(xrfgroup, '_mca2', '')
         self.plotmca(self.mca)
-
 
     def onReadMCAFile(self, event=None):
         dlg = wx.FileDialog(self, message="Open MCA File for reading",
@@ -1243,41 +1281,32 @@ class XRFDisplayFrame(wx.Frame):
                             wildcard=FILE_WILDCARDS,
                             style = wx.FD_OPEN|wx.FD_CHANGE_DIR)
 
-        fnew= None
+        filename = None
         if dlg.ShowModal() == wx.ID_OK:
-            fnew = os.path.abspath(dlg.GetPath())
+            filename = os.path.abspath(dlg.GetPath())
         dlg.Destroy()
 
-        if fnew is None:
+        if filename is None:
             return
-        self.mca2 = None
         if self.mca is not None:
             self.mca2 = copy.deepcopy(self.mca)
 
-        self.mca = gsemca_group(fnew, _larch=self.larch)
-        self.plotmca(self.mca, show_mca2=True)
-
-    def onReadGSEXRMFile(self, event=None, **kws):
-        print( '  onReadGSEXRMFile   ')
-        pass
-
-    def onOpenEpicsMCA(self, event=None, **kws):
-        print( '  onOpenEpicsMCA   ')
-        pass
+        self.add_mca(GSEMCA_File(filename), filename=filename)
 
     def onSaveMCAFile(self, event=None, **kws):
         deffile = ''
-        if hasattr(self.mca, 'sourcefile'):
-            deffile = "%s%s" % (deffile, getattr(self.mca, 'sourcefile'))
-        elif hasattr(self.mca, 'filename'):
-            deffile = "%s%s" % (deffile, getattr(self.mca, 'filename'))
-        if hasattr(self.mca, 'areaname'):
-            deffile = "%s_%s" % (deffile, getattr(self.mca, 'areaname'))
+        if getattr(self.mca, 'sourcefile', None) is not None:
+            deffile = "%s%s" % (deffile, self.mca.sourcefile)
+        elif getattr(self.mca, 'filename', None) is not None:
+            deffile = "%s%s" % (deffile, self.mca.filename)
+        if getattr(self.mca, 'areaname', None) is not None:
+            deffile = "%s_%s" % (deffile, self.mca.areaname)
         if deffile == '':
             deffile ='test'
         if not deffile.endswith('.mca'):
             deffile = deffile + '.mca'
 
+        _, deffile = os.path.split(deffile)
         deffile = fix_filename(str(deffile))
         outfile = FileSave(self, "Save MCA File",
                            default_file=deffile,
@@ -1287,24 +1316,26 @@ class XRFDisplayFrame(wx.Frame):
 
     def onSaveColumnFile(self, event=None, **kws):
         deffile = ''
-        if hasattr(self.mca, 'sourcefile'):
-            deffile = "%s%s" % (deffile, getattr(self.mca, 'sourcefile'))
-        elif hasattr(self.mca, 'filename'):
-            deffile = "%s%s" % (deffile, getattr(self.mca, 'filename'))
-        if hasattr(self.mca, 'areaname'):
-            deffile = "%s_%s" % (deffile, getattr(self.mca, 'areaname'))
+        if getattr(self.mca, 'sourcefile', None) is not None:
+            deffile = "%s%s" % (deffile, self.mca.sourcefile)
+        elif getattr(self.mca, 'filename', None) is not None:
+            deffile = "%s%s" % (deffile, self.mca.filename)
+
+        if getattr(self.mca, 'areaname', None) is not None:
+            deffile = "%s_%s" % (deffile, self.mca.areaname)
         if deffile == '':
             deffile ='test'
         if not deffile.endswith('.dat'):
             deffile = deffile + '.dat'
 
+        _, deffile = os.path.split(deffile)
         deffile = fix_filename(str(deffile))
         ASCII_WILDCARDS = "Data File (*.dat)|*.dat|All files (*.*)|*.*"
         outfile = FileSave(self, "Save ASCII File for MCA Data",
                            default_file=deffile,
                            wildcard=ASCII_WILDCARDS)
         if outfile is not None:
-            self.mca.save_columnfile(outfile)
+            self.mca.save_ascii(outfile)
 
     def onCalibrateEnergy(self, event=None, **kws):
         try:
@@ -1358,17 +1389,13 @@ class XRFDisplayFrame(wx.Frame):
                 return
 
 class XRFApp(wx.App, wx.lib.mixins.inspection.InspectionMixin):
-    def __init__(self, mca_file=None, **kws):
-        self.mca_file = mca_file
+    def __init__(self, filename=None, **kws):
+        self.filename = filename
         wx.App.__init__(self)
 
     def OnInit(self):
         self.Init()
-        frame = XRFDisplayFrame(mca_file=self.mca_file) #
+        frame = XRFDisplayFrame(filename=self.filename)
         frame.Show()
         self.SetTopWindow(frame)
         return True
-
-
-if __name__ == "__main__":
-    XRFApp().MainLoop()

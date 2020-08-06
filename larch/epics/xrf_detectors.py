@@ -8,7 +8,7 @@ try:
     from epics.devices.struck import Struck
     from epics.wx import EpicsFunction, DelayedEpicsCallback
     HAS_EPICS = True
-except (NameError, ImportError):
+except (NameError, ImportError, AttributeError):
     HAS_EPICS = False
     EpicsFunction = lambda fcn: fcn
     DelayedEpicsCallback = lambda fcn: fcn
@@ -93,7 +93,6 @@ class Epics_Xspress3(object):
     MIN_FRAMETIME = 0.25
     MAX_FRAMES    = 12000
     def __init__(self, prefix=None, nmca=4, version=2, use_sum=True, **kws):
-
         self.nmca = nmca
         self.prefix = prefix
         self.version = version
@@ -135,7 +134,7 @@ class Epics_Xspress3(object):
         Creator = Xspress3
         if self.version < 2:
             Creator = Xspress310
-        self._xsp3 = Creator(self.prefix)
+        self._xsp3 = Creator(self.prefix, nmca=self.nmca)
 
         counterpv = self._xsp3.PV('ArrayCounter_RBV')
         counterpv.clear_callbacks()
@@ -180,19 +179,23 @@ class Epics_Xspress3(object):
         if not use_sum:
             self.mca_array_name = 'MCA%i:ArrayData'
 
-    def set_dwelltime(self, dtime=1.0, **kws):
+    def set_dwelltime(self, dtime=1.0, nframes=None, **kws):
         self._xsp3.useInternalTrigger()
         self._xsp3.FileCaptureOff()
 
-        # count forever, or close to it
-        frametime = self.MIN_FRAMETIME
-        if dtime < self.MIN_FRAMETIME:
-            nframes = self.MAX_FRAMES
-        elif dtime > self.MAX_FRAMES*self.MIN_FRAMETIME:
-            nframes   = self.MAX_FRAMES
-            frametime = 1.0*dtime/nframes
+        if nframes is None:
+            # count forever, or close to it
+            frametime = self.MIN_FRAMETIME
+            if dtime < self.MIN_FRAMETIME:
+                nframes = self.MAX_FRAMES
+            elif dtime > self.MAX_FRAMES*self.MIN_FRAMETIME:
+                nframes   = self.MAX_FRAMES
+                frametime = 1.0*dtime/nframes
+            else:
+                nframes   = int((dtime+frametime*0.1)/frametime)
         else:
-            nframes   = int((dtime+frametime*0.1)/frametime)
+            frametime = dtime
+
         self._xsp3.NumImages   = self.nframes   = nframes
         self._xsp3.AcquireTime = self.frametime = frametime
 

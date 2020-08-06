@@ -33,9 +33,9 @@ from ..utils.strutils import bytes2str, version_ge
 
 from ..xrmmap import GSEXRM_MapFile, GSEXRM_FileStatus, h5str, ensure_subgroup
 
-CEN = wx.ALIGN_CENTER|wx.ALIGN_CENTER_VERTICAL
-LEFT = wx.ALIGN_LEFT|wx.ALIGN_CENTER_VERTICAL
-RIGHT = wx.ALIGN_RIGHT|wx.ALIGN_CENTER_VERTICAL
+CEN = wx.ALIGN_CENTER
+LEFT = wx.ALIGN_LEFT
+RIGHT = wx.ALIGN_RIGHT
 ALL_CEN =  wx.ALL|CEN
 ALL_LEFT =  wx.ALL|LEFT
 
@@ -90,12 +90,10 @@ class MapMathPanel(scrolled.ScrolledPanel):
         sizer.Add(SimpleText(self, 'ROI'),         (ir, 3), (1, 1), ALL_CEN, 2)
         sizer.Add(SimpleText(self, 'DT Correct?'), (ir, 4), (1, 1), ALL_CEN, 2)
         sizer.Add(SimpleText(self, 'Array Shape'), (ir, 5), (1, 1), ALL_CEN, 2)
-        sizer.Add(SimpleText(self, 'Data Range'), (ir, 6), (1, 1), ALL_CEN, 2)
 
         self.varfile  = {}
         self.varroi   = {}
         self.varshape = {}
-        self.varrange = {}
         self.vardet   = {}
         self.varcor   = {}
         for varname in VARNAMES:
@@ -108,8 +106,6 @@ class MapMathPanel(scrolled.ScrolledPanel):
             self.varcor[varname]   = vcor   = wx.CheckBox(self, -1, ' ')
             self.varshape[varname] = vshape = SimpleText(self, '(, )',
                                                           size=(125, -1))
-            self.varrange[varname] = vrange = SimpleText(self, '[   :    ]',
-                                                         size=(125, -1))
             vcor.SetValue(self.owner.dtcor)
             vdet.SetSelection(0)
 
@@ -120,7 +116,6 @@ class MapMathPanel(scrolled.ScrolledPanel):
             sizer.Add(vroi,                         (ir, 3), (1, 1), ALL_CEN, 2)
             sizer.Add(vcor,                         (ir, 4), (1, 1), ALL_CEN, 2)
             sizer.Add(vshape,                       (ir, 5), (1, 1), ALL_LEFT, 2)
-            sizer.Add(vrange,                       (ir, 6), (1, 3), ALL_LEFT, 2)
 
         ir += 1
         sizer.Add(HLine(self, size=(350, 4)), (ir, 0), (1, 5), ALL_LEFT, 2)
@@ -198,14 +193,13 @@ class MapMathPanel(scrolled.ScrolledPanel):
                 xrmfile.del_work_array(h5str(name))
             else:
                 return
-        # print("Add Work Array: ", name, info)
         xrmfile.add_work_array(self.map, h5str(name),
                                expression=h5str(expr),
                                info=json.dumps(info))
 
         for p in self.owner.nb.pagelist:
             if hasattr(p, 'update_xrmmap'):
-                p.update_xrmmap(xrmfile=xrmfile)
+                p.update_xrmmap(xrmfile=xrmfile, set_detectors=True)
 
     def onFILE(self, evt=None, varname='a'):
 
@@ -225,18 +219,15 @@ class MapMathPanel(scrolled.ScrolledPanel):
 
         shape = self.owner.filemap[fname].get_shape()
         self.varshape[varname].SetLabel('%s' % repr(shape))
-
         map = self.owner.filemap[fname].get_roimap(roiname, det=dname, dtcorrect=dtcorr)
-        self.varrange[varname].SetLabel('[%g:%g]' % (map.min(), map.max()))
 
-    def update_xrmmap(self, xrmfile=None):
-
+    def update_xrmmap(self, xrmfile=None, set_detectors=None):
         if xrmfile is None:
             xrmfile = self.owner.current_file
 
         self.cfile = xrmfile
         self.xrmmap = xrmfile.xrmmap
-
+        self.set_file_choices(self.owner.filelist.GetItems())
         self.set_det_choices()
         self.set_workarray_choices(self.xrmmap)
 

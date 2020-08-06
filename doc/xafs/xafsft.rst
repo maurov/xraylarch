@@ -4,8 +4,6 @@
 XAFS: Fourier Transforms for XAFS
 ==============================================
 
-.. module:: _xafs
-
 Fourier transforms are central to understanding and using
 XAFS. Consequently, many of the XAFS functions in Larch use XAFS Fourier
 transforms as part of their processing, and many of the functions
@@ -140,7 +138,7 @@ encapsulated in the :func:`xftf` function.
 
     :returns:  ``None`` -- outputs are written to supplied group.
 
-    Follows the First Argument Group convention, using group members named ``k`` and ``chi``.  
+    Follows the First Argument Group convention, using group members named ``k`` and ``chi``.
     The following data is put into the output group:
 
        ================= ===============================================================
@@ -207,7 +205,7 @@ the explicitly real :math:`\chi(k)`.
 
     :returns:  ``None`` -- outputs are written to supplied group.
 
-    Follows the First Argument Group convention, using group members named ``r`` and ``chir``.  
+    Follows the First Argument Group convention, using group members named ``r`` and ``chir``.
     The following data is put into the output group:
 
        ================= ===============================================================
@@ -355,7 +353,7 @@ Welch windows, and illustrated in the two following figures.
     :width: 100%
 
 .. subfigend::
-    :width: 0.45
+    :width: .45
     :label: fig-xafsft1
 
     Fourier Transform window examples and illustration of parameter meaning
@@ -383,7 +381,7 @@ Some more window functions:
     :width: 100%
 
 .. subfigend::
-    :width: 0.45
+    :width: .45
     :label: fig-xafsft2
 
     Fourier Transform window examples and illustration of parameter
@@ -416,7 +414,7 @@ approaches a nearly Gaussian lineshape.
     :width: 100%
 
 .. subfigend::
-    :width: 0.45
+    :width: .45
     :label: fig-xafsft3
 
     Fourier Transform windows. On the left, a comparison of Kaiser-Bessel,
@@ -463,7 +461,7 @@ would result in the following results:
     :width: 100%
 
 .. subfigend::
-    :width: 0.45
+    :width: .45
     :label: fig-xafsft4
 
     Comparison of the effect of different values of ``dk`` on real XAFS
@@ -506,12 +504,12 @@ would result in the following results:
 .. _fig-xafsft_winsb:
 
 .. figure::  ../_images/xft_example4.png
-    :target: ../_images/xft_example4.psng
+    :target: ../_images/xft_example4.png
     :width: 100%
 
 .. subfigend::
-    :width: 0.45
-    :label: fig-xafsft_wins
+    :width: .45
+    :label: fig-xafsft-windows
 
     Comparison of the effect of different window types on real XAFS Fourier
     transforms.
@@ -568,10 +566,9 @@ the spectra, or the first two shells, and compare the resulting filtered
     :target: ../_images/xft_example7.png
     :width: 100%
 
-
 .. subfigend::
-    :width: 0.45
-    :label: fig_xafsft_filter
+    :width: .45
+    :label: fig-xafsft-filter
 
     Reverse XAFS Fourier transform, or Fourier filtering.  Here, one can
     see the effect of different window sizes on the Fourier filtered
@@ -580,5 +577,3 @@ the spectra, or the first two shells, and compare the resulting filtered
 
 Note that it is ``chiq_re`` that is compared to the k-weighted ``chi``
 array.
-
-

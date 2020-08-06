@@ -119,6 +119,9 @@ def param(*args, **kws):
         kws.pop('_larch')
     if 'vary' not in kws:
         kws['vary'] = False
+    if 'name' not in kws:
+        kws['name'] = '_tmp_param_'
+
     return Parameter(*args, **kws)
 
 def guess(value,  **kws):
@@ -282,7 +285,7 @@ def fit_report(fit_result, modelpars=None, show_correl=True, min_correl=0.1,
     return "Cannot make fit report with %s" % repr(fit_result)
 
 
-def confidence_intervals(fit_result, sigmas=(1, 2, 3), _larch=None,  **kws):
+def confidence_intervals(fit_result, sigmas=(1, 2, 3), **kws):
     """calculate the confidence intervals from a fit
     for supplied sigma values
 
@@ -292,7 +295,7 @@ def confidence_intervals(fit_result, sigmas=(1, 2, 3), _larch=None,  **kws):
     result = getattr(fit_result, 'fit_details', None)
     return conf_interval(fitter, result, sigmas=sigmas, **kws)
 
-def chi2_map(fit_result, xname, yname, nx=11, ny=11, sigma=3, _larch=None, **kws):
+def chi2_map(fit_result, xname, yname, nx=11, ny=11, sigma=3, **kws):
     """generate a confidence map for any two parameters for a fit
 
     Arguments
@@ -336,6 +339,8 @@ def chi2_map(fit_result, xname, yname, nx=11, ny=11, sigma=3, _larch=None, **kws
                            nx=nx, ny=ny, **kws)
 
 def _Parameters(*arg, _larch=None, **kws):
+    if _larch is not None and 'asteval' not in kws:
+        kws['asteval'] =_larch.symtable._sys.fiteval
     return Parameters(*arg, **kws)
 
 

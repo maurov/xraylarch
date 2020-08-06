@@ -16,9 +16,16 @@ def fix_xrd1d_filename(xrd_file):
     """check for 1D XRD file from Eiger or other detector --
     avoids having to read hdf5 file at all
     """
+    # first append '.npy'
+    xrd1d_file = xrd_file  + '.npy'
+    if os.path.exists(xrd1d_file):
+        return xrd1d_file
+
+    # second, eiger .h5 -> .npy
     xrd1d_file = xrd_file.replace('.h5', '.npy').replace('_master', '')
     if os.path.exists(xrd1d_file):
         return xrd1d_file
+
     return None
 
 def parse_sisnames(text):
@@ -163,14 +170,13 @@ class GSEXRM_MapRow:
         self.read_ok = False
         self.nrows_expected = nrows_expected
 
-        ioff = ioffset
-        if ioff is None:
-            offslice = slice(None, None, None)
-        elif ioff > 0:
-            offslice = slice(ioff, None, None)
-        elif ioff < 0:
-            offslice = slice(None, ioff, None)
-
+        offslice = slice(None, None, None)
+        if ioffset is None:
+            ioffset = 0
+        if ioffset > 0:
+            offslice = slice(ioffset, None, None)
+        elif ioffset < 0:
+            offslice = slice(None, ioffset, None)
         self.npts = npts
         self.irow = irow
         if self.irow is None:
@@ -211,7 +217,7 @@ class GSEXRM_MapRow:
             else:
                 xrd_reader = read_xrd_netcdf
 
-        # print( "xrd_reader ", xrd_reader, xrdfile, ' cal :%s: ' % xrdcal)
+            # print( "xrd_reader ", xrd_reader, xrdtype, xrdfile, ' cal :%s: ' % xrdcal)
         # reading can fail with IOError, generally meaning the file isn't
         # ready for read.  Try again for up to 5 seconds
         t0 = time.time()
@@ -263,7 +269,7 @@ class GSEXRM_MapRow:
         xrf_dat, xrf_file = None, os.path.join(folder, xrffile)
         xrd_dat, xrd_file = None, os.path.join(folder, xrdfile)
         xrd1d_file = fix_xrd1d_filename(xrd_file)
-
+        has_xrd1d = xrd1d_file is not None
         while atime < 0 and time.time()-t0 < 10:
             try:
                 atime = os.stat(os.path.join(folder, sisfile)).st_ctime
@@ -277,7 +283,7 @@ class GSEXRM_MapRow:
                         print( 'Failed to read XRD data from %s' % self.xrdfile)
 
             except (IOError, IndexError):
-                time.sleep(0.010)
+                time.sleep(0.025)
 
         if atime < 0:
             print( 'Failed to read data.')
@@ -345,19 +351,19 @@ class GSEXRM_MapRow:
                 self.xrd2d[self.xrd2d < 0] = 0
             ############################################################################
 
-            # print("read XRD1D file? ", irow, has_xrd1d, xrdcal is not None, xrd1d_file)
+            # print("read XRD1D file? ", irow, has_xrd1d, xrdcal, xrdcal is not None, xrd1d_file)
             if has_xrd1d and xrdcal is not None:
                 attrs = dict(steps=steps, flip=flip)
                 if xrd1d_file is not None:
                     xdat = np.load(xrd1d_file)
                     self.xrdq  = xdat[0, :]
                     self.xrd1d = xdat[1:, :]
-                    # print("READ XRDQ 1D ", self.xrdq.shape, self.xrd1d.shape)
+                    # print(">>>READ XRDQ 1D ", xrd1d_file, self.xrdq.shape, self.xrd1d.shape)
                 if self.xrdq is None and self.xrd2d is not None: # integrate data if needed.
                     print("will try to integrate 2DXRD data ", self.xrd2d.shape)
-                    attrs['flip'] = True
-                    self.xrd2d = self.xrd2d[:, 1:-1, 3:-3]
-                    maxval = 2**32 - 2**14
+                    # attrs['flip'] = True
+                    # self.xrd2d = self.xrd2d[:, 1:-1, 3:-3]
+                    # maxval = 2**32 - 2**14
                     self.xrd2d[np.where(self.xrd2d>maxval)] = 0
                     self.xrdq, self.xrd1d = integrate_xrd_row(self.xrd2d, xrdcal,
                                                               **attrs)

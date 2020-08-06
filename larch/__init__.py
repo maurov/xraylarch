@@ -12,13 +12,11 @@ if os.name == 'nt':
 import numpy
 import time
 
-from distutils.version import StrictVersion
-
 import warnings
 warnings.simplefilter('ignore')
 
 if (sys.version_info.major < 3 or sys.version_info.minor < 5):
-    raise EnvironmentError('larch requires python 3.5 or higher')
+    raise EnvironmentError('larch requires python 3.6 or higher')
 
 # note: for HDF5 File / Filter Plugins to be useful, the
 # hdf5plugin module needs to be imported before h5py
@@ -27,19 +25,18 @@ try:
 except ImportError:
     pass
 
-# note: for lmfit 0.9.12 and earlier or any other import that does
+# we set the matplotlib backend before import lmfit / pyplot
 #    import matplotlib.pyplot as plt
-# we have to set the matplotlib backend before import lmfit / pyplot
+try:
+    import wx
+    with warnings.catch_warnings():
+        warnings.filterwarnings('error')
+        matplotlib.use("WXAgg")
+except:
+    pass
+
 import matplotlib
 import lmfit
-if StrictVersion(lmfit.__version__.split('+')[0]) < StrictVersion('0.9.13'):
-    try:
-        import wx
-        with warnings.catch_warnings():
-            warnings.filterwarnings('error')
-            matplotlib.use("WXAgg")
-    except:
-        pass
 
 from .version import __date__, __version__
 from .symboltable import Group, isgroup

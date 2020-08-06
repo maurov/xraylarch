@@ -12,8 +12,8 @@ from larch.utils.strutils import file2groupname
 
 from larch.wxlib import (GridPanel, BitmapButton, FloatCtrl, FloatSpin,
                          FloatSpinWithPin, get_icon, SimpleText, Choice,
-                         SetTip, Check, Button, HLine, OkCancel, LCEN,
-                         RCEN, plotlabels)
+                         SetTip, Check, Button, HLine, OkCancel, LEFT,
+                         plotlabels)
 
 from larch.xafs.xafsutils  import etok, ktoe
 
@@ -53,7 +53,7 @@ class OverAbsorptionDialog(wx.Dialog):
         wx.Dialog.__init__(self, parent, wx.ID_ANY, size=(550, 400),
                            title="Correct Over-absorption")
 
-        panel = GridPanel(self, ncols=3, nrows=4, pad=4, itemstyle=LCEN)
+        panel = GridPanel(self, ncols=3, nrows=4, pad=4, itemstyle=LEFT)
         self.wids = wids = {}
 
         wids['grouplist'] = Choice(panel, choices=groupnames, size=(250, -1),
@@ -211,7 +211,7 @@ class EnergyCalibrateDialog(wx.Dialog):
         wx.Dialog.__init__(self, parent, wx.ID_ANY, size=(550, 400),
                            title="Calibrate / Align Energy")
 
-        panel = GridPanel(self, ncols=3, nrows=4, pad=4, itemstyle=LCEN)
+        panel = GridPanel(self, ncols=3, nrows=4, pad=4, itemstyle=LEFT)
 
         self.wids = wids = {}
         wids['grouplist'] = Choice(panel, choices=groupnames, size=(250, -1),
@@ -460,7 +460,7 @@ class RebinDataDialog(wx.Dialog):
         wx.Dialog.__init__(self, parent, wx.ID_ANY, size=(550, 400),
                            title="Rebin mu(E) Data")
 
-        panel = GridPanel(self, ncols=3, nrows=4, pad=2, itemstyle=LCEN)
+        panel = GridPanel(self, ncols=3, nrows=4, pad=2, itemstyle=LEFT)
 
         self.wids = wids = {}
 
@@ -649,7 +649,7 @@ class SmoothDataDialog(wx.Dialog):
         wx.Dialog.__init__(self, parent, wx.ID_ANY, size=(550, 400),
                            title="Smooth mu(E) Data")
 
-        panel = GridPanel(self, ncols=3, nrows=4, pad=4, itemstyle=LCEN)
+        panel = GridPanel(self, ncols=3, nrows=4, pad=4, itemstyle=LEFT)
 
         self.wids = wids = {}
 
@@ -827,7 +827,7 @@ class DeconvolutionDialog(wx.Dialog):
         wx.Dialog.__init__(self, parent, wx.ID_ANY, size=(550, 400),
                            title="Deconvolve mu(E) Data")
 
-        panel = GridPanel(self, ncols=3, nrows=4, pad=4, itemstyle=LCEN)
+        panel = GridPanel(self, ncols=3, nrows=4, pad=4, itemstyle=LEFT)
 
         self.wids = wids = {}
 
@@ -959,7 +959,7 @@ class DeglitchDialog(wx.Dialog):
         wx.Dialog.__init__(self, parent, wx.ID_ANY, size=(550, 400),
                            title="Select Points to Remove")
 
-        panel = GridPanel(self, ncols=3, nrows=4, pad=4, itemstyle=LCEN)
+        panel = GridPanel(self, ncols=3, nrows=4, pad=4, itemstyle=LEFT)
         self.wids = wids = {}
 
         wids['grouplist'] = Choice(panel, choices=groupnames, size=(250, -1),
@@ -1142,6 +1142,27 @@ clear undo history''')
         raise AttributError("use as non-modal dialog!")
 
 
+
+SPECCALC_SETUP = """#From SpectraCalc dialog:
+_x = {group:s}.{xname:s}
+a = {group:s}.{yname:s}
+b = c = d = e = f = g = None
+"""
+
+SPECCALC_INTERP = "{key:s} = interp({group:s}.{xname:s}, {group:s}.{yname:s}, _x)"
+SPECCALC_PLOT = """plot(_x, ({expr:s}), label='{expr:s}', new=True,
+   show_legend=True, xlabel='{xname:s}', title='Spectral Calculation')"""
+
+SPECCALC_SAVE = """{new:s} = copy_xafs_group({group:s})
+{new:s}.groupname = '{new:s}'
+{new:s}.filename = '{fname:s}'
+{new:s}.calc_groups = {group_map:s}
+{new:s}.calc_arrayname = '{yname:s}'
+{new:s}.calc_expr = '{expr:s}'
+{new:s}.mu = ({expr:s})
+del _x, a, b, c, d, e, f, g"""
+
+
 class SpectraCalcDialog(wx.Dialog):
     """dialog for adding and subtracting spectra"""
     def __init__(self, parent, controller, **kws):
@@ -1160,7 +1181,7 @@ class SpectraCalcDialog(wx.Dialog):
         wx.Dialog.__init__(self, parent, wx.ID_ANY, size=(550, 400),
                            title="Spectra Calculations: Add, Subtract Spectra")
 
-        panel = GridPanel(self, ncols=3, nrows=4, pad=4, itemstyle=LCEN)
+        panel = GridPanel(self, ncols=3, nrows=4, pad=4, itemstyle=LEFT)
 
         def add_text(text, dcol=1, newrow=True):
             panel.Add(SimpleText(panel, text), dcol=dcol, newrow=newrow)
@@ -1236,19 +1257,14 @@ class SpectraCalcDialog(wx.Dialog):
         if not hasattr(group_a, xname):
             xname = 'xdat'
 
-        cmds = ['#From SpectraCalc dialog: ',
-                'a = b = c = d = e = f = g = None',
-                '_x = %s.%s' % (group_a.groupname, xname),
-                'a = %s.%s' % (group_a.groupname, self.yname)]
-        fmt = '%s = interp(%s.%s, %s.%s, _x)'
-        for key, group in groups.items():
-            cmds.append(fmt % (key, group.groupname, xname,
-                               group.groupname, self.yname))
-        cmds.append('_y = %s' % self.expr)
-        cmds.append("""plot(_x, _y, label='%s', new=True,
-   show_legend=True, xlabel='%s', title='Spectral Calculation')"""
-                    % (self.expr, xname))
+        cmds = [SPECCALC_SETUP.format(group=group_a.groupname,
+                                      xname=xname, yname=self.yname)]
 
+        for key, group in groups.items():
+            cmds.append(SPECCALC_INTERP.format(key=key, group=group.groupname,
+                                               xname=xname, yname=self.yname))
+
+        cmds.append(SPECCALC_PLOT.format(expr=self.expr, xname=xname))
         self.controller.larch.eval('\n'.join(cmds))
         self.wids['save_as'].Enable()
 
@@ -1259,15 +1275,10 @@ class SpectraCalcDialog(wx.Dialog):
         new_fname =self.wids['save_as_name'].GetValue()
         new_gname = file2groupname(new_fname, slen=5, symtable=_larch.symtable)
 
-        cmds = ['%s = copy_group(%s)' % (new_gname, self.group_a.groupname),
-                '%s.groupname = \'%s\'' % (new_gname, new_gname),
-                '%s.filename = \'%s\'' % (new_gname, new_fname),
-                '%s.calc_groups = %s' % (new_gname, repr(self.group_map)),
-                '%s.calc_expr = \'%s\'' % (new_gname, self.expr),
-                '%s.%s = %s' % (new_gname, self.yname, self.expr),
-                'del _x, _y, a, b, c, d, e, f, g']
-
-        _larch.eval('\n'.join(cmds))
+        _larch.eval(SPECCALC_SAVE.format(new=new_gname, fname=new_fname,
+                                         group=self.group_a.groupname,
+                                         group_map=repr(self.group_map),
+                                         yname=self.yname, expr=self.expr))
 
         ngroup = getattr(_larch.symtable, new_gname, None)
         if ngroup is not None:
@@ -1285,11 +1296,11 @@ class EnergyUnitsDialog(wx.Dialog):
 
         self.parent = parent
         self.energy = 1.0*energy_array
-        print(" energy units " , unitname, dspace)
+
         title = "Select Energy Units to convert to 'eV'"
         wx.Dialog.__init__(self, parent, wx.ID_ANY, title=title)
 
-        panel = GridPanel(self, ncols=3, nrows=4, pad=2, itemstyle=LCEN)
+        panel = GridPanel(self, ncols=3, nrows=4, pad=2, itemstyle=LEFT)
 
         self.en_units = Choice(panel, choices=self.unit_choices, size=(125, -1),
                                action=self.onUnits)
@@ -1350,7 +1361,7 @@ class MergeDialog(wx.Dialog):
         title = "Merge %i Selected Groups" % (len(groupnames))
         wx.Dialog.__init__(self, parent, wx.ID_ANY, title=title)
 
-        panel = GridPanel(self, ncols=3, nrows=4, pad=2, itemstyle=LCEN)
+        panel = GridPanel(self, ncols=3, nrows=4, pad=2, itemstyle=LEFT)
 
         self.master_group = Choice(panel, choices=groupnames, size=(250, -1))
         self.yarray_name  = Choice(panel, choices=self.ychoices, size=(250, -1))
@@ -1397,7 +1408,7 @@ class ExportCSVDialog(wx.Dialog):
         if len(groupnames) > 0:
             default_fname = "%s_%i.csv" % (groupnames[0], len(groupnames))
 
-        panel = GridPanel(self, ncols=3, nrows=4, pad=2, itemstyle=LCEN)
+        panel = GridPanel(self, ncols=3, nrows=4, pad=2, itemstyle=LEFT)
 
         self.master_group = Choice(panel, choices=groupnames, size=(200, -1))
         self.yarray_name  = Choice(panel, choices=list(self.ychoices.keys()), size=(200, -1))
@@ -1432,7 +1443,7 @@ class QuitDialog(wx.Dialog):
         title = "Quit Larch XAS Viewer?"
         wx.Dialog.__init__(self, parent, wx.ID_ANY, title=title, size=(425, 150))
         self.needs_save = True
-        panel = GridPanel(self, ncols=3, nrows=4, pad=2, itemstyle=LCEN)
+        panel = GridPanel(self, ncols=3, nrows=4, pad=2, itemstyle=LEFT)
 
         self.save = Check(panel, default=False,
                           label='Save Project before Quitting?')
@@ -1456,7 +1467,7 @@ class RenameDialog(wx.Dialog):
         title = "Rename Group %s" % (oldname)
         wx.Dialog.__init__(self, parent, wx.ID_ANY, title=title)
 
-        panel = GridPanel(self, ncols=3, nrows=4, pad=2, itemstyle=LCEN)
+        panel = GridPanel(self, ncols=3, nrows=4, pad=2, itemstyle=LEFT)
 
         self.newname   = wx.TextCtrl(panel, -1, oldname,  size=(250, -1))
 
@@ -1484,7 +1495,7 @@ class RemoveDialog(wx.Dialog):
         self.grouplist = grouplist
         wx.Dialog.__init__(self, parent, wx.ID_ANY, title=title)
 
-        panel = GridPanel(self, ncols=3, nrows=4, pad=2, itemstyle=LCEN)
+        panel = GridPanel(self, ncols=3, nrows=4, pad=2, itemstyle=LEFT)
 
         panel.Add(SimpleText(panel, 'Remove %i Selected Groups?' % (len(grouplist))),
                   newrow=True, dcol=2)

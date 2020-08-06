@@ -53,9 +53,9 @@ ENERGY = 18.0
 
 SRCH_MTHDS = peakfinder_methods()
 
-CEN = wx.ALIGN_CENTER|wx.ALIGN_CENTER_VERTICAL
-LEFT = wx.ALIGN_LEFT|wx.ALIGN_CENTER_VERTICAL
-RIGHT = wx.ALIGN_RIGHT|wx.ALIGN_CENTER_VERTICAL
+CEN = wx.ALIGN_CENTER
+LEFT = wx.ALIGN_LEFT
+RIGHT = wx.ALIGN_RIGHT
 ALL_CEN =  wx.ALL|CEN
 ALL_LEFT =  wx.ALL|LEFT
 ALL_RIGHT =  wx.ALL|RIGHT
@@ -2805,7 +2805,7 @@ class PeakToolsPanel(wx.Panel):
         intthrsizer = wx.BoxSizer(wx.VERTICAL)
 
         ttl_intthr = wx.StaticText(self, label='Intensity threshold')
-        self.val_intthr = wx.TextCtrl(self,wx.TE_PROCESS_ENTER)
+        self.val_intthr = wx.TextCtrl(self, style=wx.TE_PROCESS_ENTER)
         self.val_intthr.Bind(wx.EVT_TEXT_ENTER, partial(self.owner.find_peaks, filter=True))
         hbox1_pks.Add(ttl_intthr,  flag=wx.RIGHT, border=8)
         hbox1_pks.Add(self.val_intthr,  flag=wx.RIGHT, border=8)
@@ -3214,9 +3214,6 @@ class DatabaseInfoGUI(wx.Dialog):
 
         sizer = wx.BoxSizer(wx.VERTICAL)
 
-
-        LEFT = wx.ALIGN_LEFT|wx.ALIGN_CENTER_VERTICAL
-
         ## Database info
         self.txt_dbname = wx.StaticText(self.panel, label='Current file : ')
         self.txt_nocif  = wx.StaticText(self.panel, label='Number of cif entries : ')
@@ -3295,8 +3292,6 @@ class XRDSearchGUI(wx.Dialog):
         sizer = wx.BoxSizer(wx.VERTICAL)
         grd_sizer = wx.GridBagSizer( 5, 6)
         ok_sizer = wx.BoxSizer(wx.HORIZONTAL)
-
-        LEFT = wx.ALIGN_LEFT|wx.ALIGN_CENTER_VERTICAL
 
         ## Mineral search
         lbl_Mineral  = wx.StaticText(self.panel, label='Mineral name:' )
@@ -3748,8 +3743,6 @@ class XRDSymmetrySearch(wx.Dialog):
         sizer = wx.BoxSizer(wx.VERTICAL)
         grd_sizer = wx.GridBagSizer( 5, 6)
         ok_sizer = wx.BoxSizer(wx.HORIZONTAL)
-
-        LEFT = wx.ALIGN_LEFT|wx.ALIGN_CENTER_VERTICAL
 
         ## Lattice parameters
         lbl_a = wx.StaticText(self.panel,    label='a (A)' )

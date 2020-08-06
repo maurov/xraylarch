@@ -58,8 +58,7 @@ def call_signature(obj):
     """try to get call signature for callable object"""
     fname = obj.__name__
 
-    # print("CALL SIG1: ", obj,  getattr(obj, '__module__', '<>'))
-    # print(dir(obj))
+
     if isinstance(obj, partial):
         obj = obj.func
 
@@ -174,7 +173,7 @@ class FillingTree(wx.TreeCtrl):
         """Return true if object has children."""
         children = self.objGetChildren(obj)
         if isinstance(children, dict):
-            return len(children) > 1
+            return len(children) > 0
         else:
             return False
 
@@ -212,8 +211,10 @@ class FillingTree(wx.TreeCtrl):
             if not ((key.startswith('__') and key.endswith('__')) or
                     key.startswith('_SymbolTable') or
                     key == '_main'):
-                a = getattr(obj, key)
-                out[key] = a
+                try:
+                    out[key] = getattr(obj, key)
+                except:
+                    out[key] = key
         return out
 
     def addChildren(self, item):
@@ -246,10 +247,7 @@ class FillingTree(wx.TreeCtrl):
         item = self.item
         if not item:
             return
-
         obj = self.GetPyData(item)
-        # print("Display: ", item, obj, isinstance(obj, Procedure),
-
         if self.IsExpanded(item):
             self.addChildren(item)
         self.setText('')
@@ -474,6 +472,8 @@ class Filling(wx.SplitterWindow):
             pass
 
     def get_node_by_name(self, node, name):
+        if node is None:
+            node = self.tree.GetRootItem()
         item, cookie = self.tree.GetFirstChild(node)
         if item.IsOk() and self.tree.GetItemText(item) == name:
             return item

@@ -32,9 +32,7 @@ all kept in the :data:`_xafs` Group, which can be easily accessed, as this
 is in the default search path.
 
 
-.. module:: _xafs
-   :synopsis: Basic XAFS Functions
-
+:synopsis: Basic XAFS Functions
 
 .. toctree::
    :maxdepth: 2
@@ -48,3 +46,9 @@ is in the default search path.
    feffpaths
    feffit
    diffkk
+
+.. rubric:: References
+
+.. bibliography:: ../larch.bib
+    :filter: cited and ({'xafs/index'} >= docnames)
+    :style: authorlist

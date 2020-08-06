@@ -14,7 +14,7 @@ from larch.math import index_of
 
 from larch.wxlib import (BitmapButton, FloatCtrl, FloatSpin, ToggleButton,
                          get_icon, SimpleText, pack, Button, HLine, Choice,
-                         plotlabels, Check, CEN, RCEN, LCEN)
+                         plotlabels, Check, CEN, RIGHT, LEFT)
 
 from larch.xafs.xafsutils import etok, ktoe
 
@@ -61,8 +61,8 @@ xftf_cmd = """xftf({group:s}, kmin={fft_kmin: .3f}, kmax={fft_kmax: .3f},
       kweight={fft_kweight: .3f}, dk={fft_dk: .3f}, window='{fft_kwindow:s}')"""
 
 
-defaults = dict(e0=0, rbkg=1, bkg_kmin=0, bkg_kmax=None, bkg_clamplo=2,
-                bkg_clamphi=50, bkg_kweight=1, fft_kmin=2, fft_kmax=None,
+defaults = dict(e0=-1.0, rbkg=1, bkg_kmin=0, bkg_kmax=None, bkg_clamplo=0,
+                bkg_clamphi=1, bkg_kweight=1, fft_kmin=2.5, fft_kmax=None,
                 fft_dk=4, fft_kweight=2, fft_kwindow='Kaiser-Bessel')
 
 class EXAFSPanel(TaskPanel):
@@ -178,65 +178,67 @@ class EXAFSPanel(TaskPanel):
 
         panel.Add(HLine(panel, size=(500, 3)), dcol=6, newrow=True)
 
-        panel.Add(SimpleText(panel, ' Background subtraction',
-                             **self.titleopts), dcol=3, newrow=True)
-
+        panel.Add(SimpleText(panel, ' Background subtraction', size=(180, -1),
+                             **self.titleopts), dcol=2, style=LEFT, newrow=True)
         panel.Add(SimpleText(panel, 'Copy To Selected Groups:'),
-                  style=RCEN, dcol=2)
+                  style=RIGHT, dcol=3)
 
 
         add_text('E0: ')
         panel.Add(wids['e0'])
         panel.Add((10, 10), dcol=2)
-        panel.Add(CopyBtn('e0'), style=RCEN)
+        panel.Add(CopyBtn('e0'), style=RIGHT)
 
 
         add_text('R bkg: ')
         panel.Add(wids['rbkg'])
         panel.Add((10, 10), dcol=2)
-        panel.Add(CopyBtn('rbkg'), style=RCEN)
+        panel.Add(CopyBtn('rbkg'), style=RIGHT)
 
         add_text('k min: ')
         panel.Add(bkg_kmin)
-        add_text('k max:',newrow=False)
+        panel.Add(SimpleText(panel, 'k max:', size=(75, -1)), style=LEFT)
         panel.Add(bkg_kmax)
-        panel.Add(CopyBtn('bkg_krange'), style=RCEN)
+        panel.Add(CopyBtn('bkg_krange'), style=RIGHT)
 
         add_text('kweight: ', newrow=True)
         panel.Add(wids['bkg_kweight'])
         panel.Add((10, 10), dcol=2)
-        panel.Add(CopyBtn('bkg_kweight'), style=RCEN)
+        panel.Add(CopyBtn('bkg_kweight'), style=RIGHT)
 
 
         add_text('Clamps Low E: ', newrow=True)
         panel.Add( wids['bkg_clamplo'])
         add_text('high E: ',  newrow=False)
         panel.Add( wids['bkg_clamphi'])
-        panel.Add(CopyBtn('bkg_clamp'), style=RCEN)
+        panel.Add(CopyBtn('bkg_clamp'), style=RIGHT)
 
         panel.Add(HLine(panel, size=(500, 3)), dcol=6, newrow=True)
 
-        panel.Add(SimpleText(panel, ' Fourier transform',
-                             **self.titleopts), dcol=2, newrow=True)
+        panel.Add(SimpleText(panel, ' Fourier transform    ', size=(180, -1),
+                             **self.titleopts), dcol=2, style=LEFT, newrow=True)
+        panel.Add(SimpleText(panel, 'Copy To Selected Groups:'),
+                  style=RIGHT, dcol=3)
+
 
         panel.Add(SimpleText(panel, 'k min: '), newrow=True)
         panel.Add(fft_kmin)
 
-        panel.Add(SimpleText(panel, 'k max:'))
+        panel.Add(SimpleText(panel, 'k max:', size=(75, -1)), style=LEFT)
         panel.Add(fft_kmax)
-        panel.Add(CopyBtn('fft_krange'), style=RCEN)
+        panel.Add(CopyBtn('fft_krange'), style=RIGHT)
 
         panel.Add(SimpleText(panel, 'k weight : '), newrow=True)
         panel.Add(wids['fft_kweight'])
         panel.Add((10, 10), dcol=2)
-        panel.Add(CopyBtn('fft_kweight'), style=RCEN)
+        panel.Add(CopyBtn('fft_kweight'), style=RIGHT)
 
 
         panel.Add(SimpleText(panel, 'K window : '), newrow=True)
         panel.Add(wids['fft_kwindow'])
         panel.Add(SimpleText(panel, ' dk : '))
         panel.Add(wids['fft_dk'])
-        panel.Add(CopyBtn('fft_kwindow'), style=RCEN)
+        panel.Add(CopyBtn('fft_kwindow'), style=RIGHT)
 
         panel.Add((10, 10), newrow=True)
         panel.Add(self.wids['is_frozen'], dcol=1, newrow=True)
@@ -247,8 +249,8 @@ class EXAFSPanel(TaskPanel):
         panel.pack()
 
         sizer = wx.BoxSizer(wx.VERTICAL)
-        sizer.Add((10, 10), 0, LCEN, 3)
-        sizer.Add(panel, 1, LCEN, 3)
+        sizer.Add((10, 10), 0, LEFT, 3)
+        sizer.Add(panel, 1, LEFT, 3)
         pack(self, sizer)
         self.skip_process = False
 
@@ -256,7 +258,9 @@ class EXAFSPanel(TaskPanel):
         """get and set processing configuration for a group"""
         if dgroup is None:
             dgroup = self.controller.get_group()
+        # print("EXAFS panel get_config ", dgroup)
         conf = getattr(dgroup, self.configname, self.get_defaultconfig())
+        # print("EXAFS panel get_config ", conf.get('e0', -123.))
 
         bkg_kmax = conf.get('bkg_kmax', None)
         fft_kmax = conf.get('fft_kmax', None)
@@ -414,6 +418,7 @@ class EXAFSPanel(TaskPanel):
             return
 
         bkgpars = []
+        # print(" EXAFS Process #1 e0= ", conf.get('e0', -10.))
         for attr in ('e0', 'rbkg', 'bkg_kmin', 'bkg_kmax',
                      'bkg_kweight', 'bkg_clamplo', 'bkg_clamphi'):
             val = conf.get(attr, 0.0)
@@ -421,6 +426,7 @@ class EXAFSPanel(TaskPanel):
                 val = -1.0
             bkgpars.append("%.3f" % val)
         bkgpars = ':'.join(bkgpars)
+        # print(" EXAFS Process #2 : ", bkgpars)
 
         if bkgpars != self.last_process_bkg.get(self.dgroup.groupname, ''):
             self.larch_eval(autobk_cmd.format(**conf))

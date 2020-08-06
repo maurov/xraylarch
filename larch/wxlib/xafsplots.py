@@ -132,6 +132,8 @@ def redraw(win=1, xmin=None, xmax=None, ymin=None, ymax=None,
     if (xmin is not None or xmax is not None or
         ymin is not None or ymax is not None):
         panel.set_xylims((xmin, xmax, ymin, ymax))
+    else:
+        panel.unzoom_all()
     if show_legend:  # note: draw_legend *will* redraw the canvas
         panel.conf.draw_legend()
     else:
@@ -460,7 +462,9 @@ def plot_chir(dgroup, show_mag=True, show_real=False, show_imag=False,
     if show_imag:
         _plot(dgroup.r, dgroup.chir_im+offset, label='%s (imag)' % label, **opts)
     #endif
-    redraw(win=win, xmax=rmax, _larch=_larch)
+    if show_mag or show_real or show_imag:
+        redraw(win=win, xmax=rmax, _larch=_larch)
+    #endif
 #enddef
 
 def plot_chifit(dataset, kmin=0, kmax=None, kweight=None, rmax=None,
@@ -511,11 +515,12 @@ def plot_chifit(dataset, kmin=0, kmax=None, kweight=None, rmax=None,
             label='data', new=new, **opts)
     _plot(dataset.model.k, model_chik+offset, label='fit',  **opts)
     redraw(win=win, xmin=kmin, xmax=kmax, _larch=_larch)
+
     # show chi(R) in next plot window
     opts['win'] = win = win+1
-
     ylabel = plotlabels.chirlab(kweight, show_mag=show_mag,
                                 show_real=show_real, show_imag=show_imag)
+
     opts.update(dict(xlabel=plotlabels.r, ylabel=ylabel,
                      xmax=rmax, new=True, show_legend=True))
 
@@ -524,7 +529,7 @@ def plot_chifit(dataset, kmin=0, kmax=None, kweight=None, rmax=None,
              label='|data|', **opts)
         opts['new'] = False
         _plot(dataset.model.r, dataset.model.chir_mag+offset,
-             label='|fit|', **opts)
+              label='|fit|', **opts)
     #endif
     if show_real:
         _plot(dataset.data.r, dataset.data.chir_re+offset, label='Re[data]', **opts)
@@ -532,11 +537,13 @@ def plot_chifit(dataset, kmin=0, kmax=None, kweight=None, rmax=None,
         _plot(dataset.model.r, dataset.model.chir_re+offset, label='Re[fit]',  **opts)
     #endif
     if show_imag:
-        plot(dataset.data.r, dataset.data.chir_im+offset, label='Im[data]', **opts)
+        _plot(dataset.data.r, dataset.data.chir_im+offset, label='Im[data]', **opts)
         opts['new'] = False
-        plot(dataset.model.r, dataset.model.chir_im+offset, label='Im[fit]',  **opts)
+        _plot(dataset.model.r, dataset.model.chir_im+offset, label='Im[fit]',  **opts)
     #endif
-    redraw(win=win, xmax=kmax, _larch=_larch)
+    if show_mag or show_real or show_imag:
+        redraw(win=opts['win'], xmax=opts['xmax'], _larch=_larch)
+    #endif
 #enddef
 
 def plot_path_k(dataset, ipath=0, kmin=0, kmax=None, offset=0, label=None,
