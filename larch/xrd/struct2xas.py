@@ -221,8 +221,8 @@ class Struct2XAS:
             self.mol = None
             self.nframes = 1
             self.cif = CifParser(self.file)
-            # self.struct = Structure.from_file(self.file)
-            self.struct = self.cif.get_structures()[0]
+            self.struct = Structure.from_file(self.file)
+            #self.struct = self.cif.get_structures()[0]
             logger.debug("structure created from a CIF file")
         elif ext == ".xyz":
             self.is_xyz = True
@@ -238,66 +238,66 @@ class Struct2XAS:
             logger.error(errmsg)
             raise NotImplementedError(errmsg)
 
-    def _get_atom_sites(self):
-        """get atomic positions from the cif file
+    # def _get_atom_sites(self):
+    #     """get atomic positions from the cif file
 
-        Returns
-        -------
-        atom_sites : list of list
-            same output as self.get_abs_sites()
-        """
-        if not self.is_cif:
-            errmsg = "not a CIF file!"
-            logger.error(errmsg)
-            raise NotImplementedError(errmsg)
-        cf = self.cif.as_dict()
-        cf = cf[list(cf.keys())[0]]
+    #     Returns
+    #     -------
+    #     atom_sites : list of list
+    #         same output as self.get_abs_sites()
+    #     """
+    #     if not self.is_cif:
+    #         errmsg = "not a CIF file!"
+    #         logger.error(errmsg)
+    #         raise NotImplementedError(errmsg)
+    #     cf = self.cif.as_dict()
+    #     cf = cf[list(cf.keys())[0]]
 
-        atom_lists = []
-        try:
-            labels = cf["_atom_site_label"]
-            natoms = len(labels)
-            try:
-                type_symbols = cf["_atom_site_type_symbol"]
-            except KeyError:
-                type_symbols = None
-                pass
-            if type_symbols is None:
-                atom_lists.append(labels)
-            else:
-                atom_lists.append(type_symbols)
-            atom_lists.append(cf["_atom_site_fract_x"])
-            atom_lists.append(cf["_atom_site_fract_y"])
-            atom_lists.append(cf["_atom_site_fract_z"])
-            atom_lists.append(cf["_atom_site_occupancy"])
-        except KeyError:
-            errmsg = (
-                "the CIF file does not contain all required `_atom_site_*` information"
-            )
-            logger.error(errmsg)
-            raise KeyError(errmsg)
-        try:
-            atom_lists.append(cf["_atom_site_symmetry_multiplicity"])
-            atom_lists.append(cf["_atom_site_Wyckoff_symbol"])
-        except KeyError:
-            atom_lists.append(["?"] * natoms)
-            atom_lists.append(["?"] * natoms)
+    #     atom_lists = []
+    #     try:
+    #         labels = cf["_atom_site_label"]
+    #         natoms = len(labels)
+    #         try:
+    #             type_symbols = cf["_atom_site_type_symbol"]
+    #         except KeyError:
+    #             type_symbols = None
+    #             pass
+    #         if type_symbols is None:
+    #             atom_lists.append(labels)
+    #         else:
+    #             atom_lists.append(type_symbols)
+    #         atom_lists.append(cf["_atom_site_fract_x"])
+    #         atom_lists.append(cf["_atom_site_fract_y"])
+    #         atom_lists.append(cf["_atom_site_fract_z"])
+    #         atom_lists.append(cf["_atom_site_occupancy"])
+    #     except KeyError:
+    #         errmsg = (
+    #             "the CIF file does not contain all required `_atom_site_*` information"
+    #         )
+    #         logger.error(errmsg)
+    #         raise KeyError(errmsg)
+    #     try:
+    #         atom_lists.append(cf["_atom_site_symmetry_multiplicity"])
+    #         atom_lists.append(cf["_atom_site_Wyckoff_symbol"])
+    #     except KeyError:
+    #         atom_lists.append(["?"] * natoms)
+    #         atom_lists.append(["?"] * natoms)
 
-        atom_sites = []
-        for ikey, key in enumerate(zip(*atom_lists)):
-            atom_row = [
-                ikey,
-                key[0],
-                np.array(
-                    [key[1].split("(")[0], key[2].split("(")[0], key[3].split("(")[0]],
-                    dtype=float,
-                ),
-                key[5] + key[6],
-                np.array([None, None, None]),
-                float(key[4]),
-                None,
-            ]
-            atom_sites.append(atom_row)
+    #     atom_sites = []
+    #     for ikey, key in enumerate(zip(*atom_lists)):
+    #         atom_row = [
+    #             ikey,
+    #             key[0],
+    #             np.array(
+    #                 [key[1].split("(")[0], key[2].split("(")[0], key[3].split("(")[0]],
+    #                 dtype=float,
+    #             ),
+    #             key[5] + key[6],
+    #             np.array([None, None, None]),
+    #             float(key[4]),
+    #             None,
+    #         ]
+    #         atom_sites.append(atom_row)
 
         # atom_site_keys = [key for key in cf.keys() if '_atom_site' in key]
         # atom_lists = [cf[key] for key in atom_site_keys]
@@ -305,14 +305,15 @@ class Struct2XAS:
         # for ikey, key in enumerate(zip(*atom_lists)):
         #    atom_row = [ikey, key[1], np.array([key[4], key[5], key[6]], dtype=float), key[2] + key[3], np.array([None, None, None]), float(key[8]), None]
         #    atom_sites.append(atom_row)
-        return atom_sites
+        # return atom_sites
 
-    def _get_idx_struct(self, atom_coords):
+    def _get_idx_struct(self, sym_site):
         """get the index of the pymatgen Structure corresponding to the given atomic coordinates"""
+        
         for idx, atom in enumerate(self.struct):
-            if np.allclose(atom.coords, atom_coords, atol=0.001) is True:
+            if np.allclose(atom.coords, sym_site[4], atol=0.001) is True:
                 return idx
-        errmsg = f"atomic coordinates {atom_coords} not found in self.struct"
+        errmsg = f"atomic coordinates {sym_site} not found in self.struct"
         logger.error(errmsg)
         # raise IndexError(errmsg)
         return None
@@ -359,9 +360,9 @@ class Struct2XAS:
 
             # Get multiples sites for absorber atom
             for idx, sites in enumerate(sym_struct.equivalent_sites):
-                # sites = sorted(
-                #    sites, key=lambda s: tuple(abs(x) for x in s.frac_coords)
-                # )
+                sites = sorted(
+                    sites, key=lambda s: tuple(abs(x) for x in s.frac_coords)
+                )
                 site = sites[0]
                 abs_row = [idx, site.species_string]
                 abs_row.append([j for j in np.round(site.frac_coords, 4)])
@@ -377,7 +378,7 @@ class Struct2XAS:
                         occupancy = 1
                         self.full_occupancy = True
                     abs_row.append(occupancy)
-                    abs_row.append(self._get_idx_struct(abs_row[4]))
+                    abs_row.append(self._get_idx_struct(abs_row))
                     abs_sites.append(abs_row)
 
         if self.is_xyz:
@@ -827,9 +828,9 @@ class Struct2XAS:
 
             unique_sites = []
             for sites in analyzer.get_symmetrized_structure().equivalent_sites:
-                # sites = sorted(
-                #    sites, key=lambda s: tuple(abs(x) for x in s.frac_coords)
-                # )
+                sites = sorted(
+                    sites, key=lambda s: tuple(abs(x) for x in s.frac_coords)
+                )
                 unique_sites.append((sites[0], len(sites)))
                 sites = str()
             if self.full_occupancy:
