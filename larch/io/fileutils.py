@@ -2,112 +2,24 @@
 """
 general purpose file utilities
 """
-import time
-import os
-import sys
-from random import seed, randrange
-from string import printable
-from ..utils.strutils import fix_filename, fix_varname, strip_quotes
+from pathlib import Path
+from random import Random
 
-def asciikeys(adict):
-    """ensure a dictionary has ASCII keys (and so can be an **kwargs)"""
-    return dict((k.encode('ascii'), v) for k, v in adict.items())
+alphanum = 'abcdefghijklmnopqrstuvwxyz0123456789'
 
-def get_timestamp(with_t=False):
-    """return ISO format of current timestamp:
-    argument
-    --------
-    with_t    boolean (False)
+rng = Random()
 
-    when with_t is True, the returned string
-    will match 'YYYY-mm-ddTHH:MM:SS'
-    otherwise  'YYYY-mm-dd HH:MM:SS'
-    """
-    if with_t:
-        time.strftime('%Y-%m-%dT%H:%M:%S')
-    return time.strftime('%Y-%m-%d %H:%M:%S')
-
-def random_string(n):
+def random_string(n, rng_seed=None):
     """  random_string(n)
     generates a random string of length n, that will match:
        [a-z][a-z0-9](n-1)
     """
-    seed(time.time())
-    s = [printable[randrange(0,36)] for i in range(n-1)]
-    s.insert(0, printable[randrange(10,36)])
+    if rng_seed is not None:
+        rng.seed(rng_seed)
+    s = [nng.choice(alphanum[:26])]
+    s.extend([rng.choice(alphanum) for i in range(n-2)])
     return ''.join(s)
 
-def pathOf(dir, base, ext, delim='.'):
-    """return the normalized path name of file created with
-    a directory, base, extension, and delimiter"""
-    p = os.path
-    return p.normpath(p.join(dir,"%s%s%s" % (base, delim, ext)))
-
-def unixpath(d):
-    "ensure path uses unix delimiters"
-    d = d.replace('\\','/')
-    if not d.endswith('/'): d = '%s/' % d
-    return d
-
-def winpath(d):
-    "ensure path uses windows delimiters"
-    if d.startswith('//'): d = d[1:]
-    d = d.replace('/','\\')
-    if not d.endswith('\\'): d = '%s\\' % d
-    return d
-
-def nativepath(d):
-    "ensure path uses delimiters for current OS"
-    if os.name == 'nt':
-        return winpath(d)
-    return unixpath(d)
-
-def get_homedir():
-    """return home directory, or best approximation
-    On Windows, this returns the Roaming Profile APPDATA
-    (use CSIDL_LOCAL_APPDATA for Local Profile)
-    """
-    homedir = '.'
-    if os.name == 'nt':
-        # For Windows, ask for parent of Roaming 'Application Data' directory
-        try:
-            from win32com.shell import shellcon, shell
-            homedir = shell.SHGetFolderPath(0, shellcon.CSIDL_APPDATA, 0, 0)
-        except ImportError: # if win32com is not found
-            homedir = os.get_environ('HOME', '.')
-    else:
-        try:
-            os.path.expanduser("~")
-        except:
-            pass
-    return homedir
-
-def gformat(val, length=11):
-    """format a number with '%g'-like format, except that
-    the return will be length ``length`` (default=12)
-    and have at least length-6 significant digits
-    """
-    length = max(length, 7)
-    fmt = '{: .%ig}' % (length-6)
-    if isinstance(val, int):
-        out = ('{: .%ig}' % (length-2)).format(val)
-        if len(out) > length:
-            out = fmt.format(val)
-    else:
-        out = fmt.format(val)
-    if len(out) < length:
-        if 'e' in out:
-            ie = out.find('e')
-            if '.' not in out[:ie]:
-                out = out[:ie] + '.' + out[ie:]
-            out = out.replace('e', '0'*(length-len(out))+'e')
-        else:
-            fmt = '{: .%ig}' % (length-1)
-            out = fmt.format(val)[:length]
-            if len(out) < length:
-                pad = '0' if '.' in  out else ' '
-                out += pad*(length-len(out))
-    return out
 
 def increment_filename(inpfile, ndigits=3, delim='.'):
     """
@@ -150,27 +62,26 @@ def increment_filename(inpfile, ndigits=3, delim='.'):
     'path/a.004'
 """
 
-    dirname, filename = os.path.split(inpfile)
-    base, ext = os.path.splitext(filename)
+    pinp = Path(inpfile)
+    dirname, filename = pinp.parent.as_posix(), pinp.name
+    base, ext = pinp.stem, pinp.suffix
     if ext == '':
         ext = '.000'
 
     if ext.startswith('.'):
-        ext   = ext[1:]
-    if ndigits < 3:
-        ndigits = 3
-    form  = "%%.%ii" % (ndigits)
+        ext = ext[1:]
+    ndigits = max(3, ndigits)
 
     def _incr(base, ext):
         if ext.isdigit():
-            ext = form % (int(ext)+1)
+            ext = f"{(int(ext)+1):0{ndigits}d}"
         else:
             found = False
             if '_' in base:
                 parts = base.split('_')
                 for iw, word in enumerate(parts[::-1]):
                     if word.isdigit():
-                        parts[len(parts)-iw-1] = form % (int(word)+1)
+                        parts[len(parts)-iw-1] = f"{(int(word)+1):0{ndigits}d}"
                         found = True
                         break
                 base = '_'.join(parts)
@@ -178,24 +89,24 @@ def increment_filename(inpfile, ndigits=3, delim='.'):
                 parts = base.split('.')
                 for iw, word in enumerate(parts[::-1]):
                     if word.isdigit():
-                        parts[len(parts)-iw-1] = form % (int(word)+1)
+                        parts[len(parts)-iw-1] = f"{(int(word)+1):0{ndigits}d}"
                         found = True
                         break
                 base = '.'.join(parts)
             if not found:
-                base = "%s_001" % base
+                base = f"{base}_001"
         return (base, ext)
 
     # increment once
     base, ext = _incr(base, ext)
-    fout = pathOf(dirname, base, ext, delim=delim)
+    fout = Path(dirname,f"{base}{delim}{ext}")
 
     # then gaurantee that file does not exist,
     # continuing to increment if necessary
-    while (os.path.exists(fout)):
+    while fout.exists():
         base, ext = _incr(base, ext)
-        fout = pathOf(dirname, base, ext, delim=delim)
-    return fout
+        fout = Path(dirname,f"{base}{delim}{ext}")
+    return fout.as_posix()
 
 def new_filename(fname=None, ndigits=3):
     """ generate a new file name, either based on
@@ -206,12 +117,10 @@ def new_filename(fname=None, ndigits=3):
     # if 'x.001' exists
     """
     if fname is None:
-        ext = ("%%.%ii" % ndigits) % 1
-        fname = "%s.%s" % (random_string(6), ext)
+        fname = f"{random_string(6)}.{1:0{ndigits}d}"
 
-    if os.path.exists(fname):
+    if Path(fname).exists():
         fname = increment_filename(fname, ndigits=ndigits)
-
     return fname
 
 def new_dirname(dirname=None, ndigits=3):
@@ -223,11 +132,10 @@ def new_dirname(dirname=None, ndigits=3):
     # if 'x_001' exists
     """
     if dirname is None:
-        ext = ("%%_%ii" % ndigits) % 1
-        dirname = "%s_%s" % (random_string(6), ext)
+        dirname = f"{random_string(6)}_{1:0{ndigits}d}"
 
     dirname = dirname.replace('.', '_')
-    if os.path.exists(dirname):
+    if Path(dirname).exists():
         dirname = increment_filename(dirname, ndigits=ndigits, delim='_')
     return dirname
 
@@ -247,9 +155,9 @@ def test_incrementfilename():
     for inp,out in tests:
         tval = increment_filename(inp)
         if tval != out:
-            print( "Error converting " , inp)
-            print( "Got '%s'  expected '%s'" % (tval, out))
+            print(f"Error converting {inp}")
+            print(f"Got '{tval}'  expected '{out}'")
             nfail = nfail + 1
         else:
             npass = npass + 1
-    print('Passed %i of %i tests' % (npass, npass+nfail))
+    print(f'Passed {npass} of {npass+nfail} tests')

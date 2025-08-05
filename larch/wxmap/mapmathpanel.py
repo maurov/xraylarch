@@ -5,7 +5,6 @@ GUI for displaying maps from HDF5 files
 """
 
 import os
-import platform
 import sys
 import time
 import json
@@ -22,14 +21,14 @@ try:
 except:
     PyDeadObjectError = Exception
 
-
-import h5py
 import numpy as np
+
+from pyshortcuts import bytes2str
 
 from ..wxlib import (LarchPanel, LarchFrame, EditableListBox, SimpleText,
                      FloatCtrl, Font, pack, Popup, Button, MenuItem,
                      Choice, Check, GridPanel, FileSave, HLine)
-from ..utils.strutils import bytes2str, version_ge
+from ..utils.strutils import version_ge
 
 from ..xrmmap import GSEXRM_MapFile, GSEXRM_FileStatus, h5str, ensure_subgroup
 

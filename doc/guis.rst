@@ -1,30 +1,36 @@
+.. include:: _config.rst
+
 .. _guis-chapter:
 
 =====================
-Larch GUIs
+Other Larch GUIs
 =====================
-
-.. _wxmplot:  https://newville.github.io/wxmplot
-.. _matplotlib: https://matplotlib.org/
-.. _lmfit:    https://lmfit.github.io/lmfit-py
-.. _scipy: https://scipy.org/
-.. _numpy: https://numpy.scipy.org/
-.. _h5py: https://code.google.com/p/h5py/
-.. _Dioptas: https://github.com/Dioptas/Dioptas
 
 
 .. module:: guis
    :synopsis: Graphical User Interfaces
 
-Larch provides several Graphical User Interfaces for manipulating, viewing,
-and processing of X-ray spectroscopy, scattering, and imaging data.  Many
-of the GUI displays are interrelated, so that they can bring up the other
-windows for displaying, interacting, and processing data.  The main GUIs
-for Larch are
+In addition to :ref:`Larix <larix_app>`, Larch provides a few
+other Graphical User Interfaces for manipulating, viewing, and processing
+of X-ray spectroscopy, scattering, and imaging data.  Many of the GUI
+displays are interrelated, so that they can bring up the other windows for
+displaying, interacting, and processing data.  These include
 
-  * :ref:`XAS Viewer <xasviewer_app>`: Visualization and Analysis of  XAS data.
+
+  * :ref:`Larch_XRF <larchxrf_app>`: A GUI for displaying and analyzing X-ray
+    fluorescence spectra.
+
+  * :ref:`Larch_XRD1D <larchxrd1d_app>`: A GUI for displaying and analyzing
+    X-ray Diffraction patterns, integrating XRD images to 1D XRD patterns, and
+    comparing 1D XRD patterns to known crystal structures from CIF files.
+
   * :ref:`GSE_Mapviewer <mapviewer_app>`: visualization and Analysis of XRF and XRD maps.
-  * :ref:`larch_gui <larchgui_app>`: simple command-line + data browser for Larch.
+
+  * :ref:`larch_gui <larchgui_app>`: simple command-line + data browser for
+    Larch.  This is used by other Larch GUIs as **the command-line
+    buffer**, and can be used to interact with all the raw data within the
+    application.
+
 
 .. _larchcli_app:
 
@@ -72,7 +78,7 @@ load and run a text file of commands or save the commands run in a session
 to a file.
 
 The main Larch GUI also provides simple launchers for several of the main
-Larch Applications, including XAS Viewer.
+Larch Applications, including Larix.
 
 From the Larch GUI, one can browse and act on data.  This includes the
 ability make Simple plot of 1-D data, using `wxmplot`_.  This wraps

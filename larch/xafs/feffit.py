@@ -2,27 +2,95 @@
 """
    feffit sums Feff paths to match xafs data
 """
-from collections import Iterable
+try:
+    from collections.abc import Iterable
+except ImportError:
+    from collections import Iterable
 from copy import copy, deepcopy
 from functools import partial
+import ast
 import numpy as np
 from numpy import array, arange, interp, pi, zeros, sqrt, concatenate
 
-from scipy.optimize import leastsq as scipy_leastsq
+from pyshortcuts import fix_varname, gformat
+try:
+    from tabulate import tabulate
+except ImportError:
+    tabulate = None
 
-from lmfit import Parameters, Parameter, Minimizer, fit_report
-from lmfit.printfuncs import gformat
+from scipy.interpolate import splrep, splev
+from scipy.interpolate import InterpolatedUnivariateSpline as IUSpline
+from lmfit import Parameters, Parameter, Minimizer, conf_interval2d
+from lmfit.printfuncs import getfloat_attr
 
-from larch import Group, isNamedClass
+from larch import Group
+from larch.larchlib import isNamedClass
+from larch.utils.strutils import b32hash, random_varname
+from ..math import index_of, realimag, complex_phase, remove_nans
+from ..fitting import (correlated_values, eval_stderr, ParameterGroup,
+                       dict2params, group2params, params2group, isParameter)
 
-from ..math import index_of, realimag, complex_phase
-from ..fitting import (correlated_values, eval_stderr,
-                       group2params, params2group, isParameter)
-
-from .xafsutils import set_xafsGroup
+from .xafsutils import set_xafsGroup, gfmt
 from .xafsft import xftf_fast, xftr_fast, ftwindow
-from .sigma2_models import sigma2_correldebye, sigma2_debye
-from .feffdat import PATHPAR_FMT, FeffPathGroup, ff2chi
+from .autobk import autobk_delta_chi
+from .feffdat import FeffPathGroup, ff2chi, PATH_PARS
+
+def propagate_uncertainties(result, datasets, _larch=None):
+    """propagate uncertainties from fitting Parameters to all constrained
+    Parameters, including Path Parameters
+    """
+    covar = getattr(result, 'covar', None)
+    if covar is not None:
+        n_idp = 0
+        for ds in datasets:
+            n_idp += ds.n_idp
+
+        if isinstance(result.params, dict):
+            result.params = dict2params(result.params)
+
+        # We used scale_covar=Fllalse, so we rescale the uncertainties
+        redchi = getattr(result, 'redchi', getattr(result, 'chi2_reduced', 1.0))
+        err_scale = redchi*(result.nfree/(n_idp - result.nvarys))
+        for name, par in result.params.items():
+            if isParameter(par) and getattr(par, 'stderr', None) is not None:
+                par.stderr *= sqrt(err_scale)
+
+        # next, propagate uncertainties to constraints and path parameters.
+        result.covar *= err_scale
+        vsave, vbest = {}, []
+
+        # 1. save current params
+        for vname in result.var_names:
+            par = result.params[vname]
+            vsave[vname] = par
+            vbest.append(par.value)
+        # 2. get correlated uncertainties, set params accordingly
+        uvars = correlated_values(vbest, result.covar)
+        # 3. evaluate constrained params, save stderr
+        for nam, obj in result.params.items():
+            eval_stderr(obj, uvars,  result.var_names, result.params)
+
+        # 3. evaluate path_ params, save stderr
+        for ds in datasets:
+            if ds.hashkey in (None, 'None'):
+                ds.__generate_hashkey()
+            for label, path in ds.paths.items():
+                if path.dataset is None:
+                    path.dataset = ds.hashkey
+                path.params = result.params
+                path.store_feffdat()
+                for pname in PATH_PARS:
+                    obj = path.params[path.pathpar_name(pname)]
+                    eval_stderr(obj, uvars,  result.var_names, result.params)
+        # restore saved parameters again
+        for vname in result.var_names:
+            # setattr(params, vname, vsave[vname])
+            result.params[vname] = vsave[vname]
+
+        # clear any errors evaluting uncertainties
+        if _larch is not None and (len(_larch.error) > 0):
+            _larch.error = []
+
 
 class TransformGroup(Group):
     """A Group of transform parameters.
@@ -38,7 +106,7 @@ class TransformGroup(Group):
     def __init__(self, kmin=0, kmax=20, kweight=2, dk=4, dk2=None,
                  window='kaiser', nfft=2048, kstep=0.05,
                  rmin = 0, rmax=10, dr=0, dr2=None, rwindow='hanning',
-                 fitspace='r', wavelet_mask=None, _larch=None, **kws):
+                 fitspace='r', wavelet_mask=None, rbkg=0, _larch=None, **kws):
         Group.__init__(self, **kws)
         self.kmin = kmin
         self.kmax = kmax
@@ -49,6 +117,7 @@ class TransformGroup(Group):
         self.dk = dk
         self.dk2 = dk2
         self.window = window
+        self.rbkg = rbkg
         self.rmin = rmin
         self.rmax = rmax
         self.dr = dr
@@ -78,7 +147,7 @@ class TransformGroup(Group):
         return TransformGroup(kmin=self.kmin, kmax=self.kmax,
                               kweight=self.kweight, dk=self.dk, dk2=self.dk2,
                               window=self.window, kstep=self.kstep,
-                              rmin=self.rmin, rmax=self.rmax,
+                              rmin=self.rmin, rmax=self.rmax, rbkg=self.rbkg,
                               dr=self.dr, dr2=self.dr2,
                               rwindow=self.rwindow, nfft=self.nfft,
                               fitspace=self.fitspace,
@@ -89,7 +158,7 @@ class TransformGroup(Group):
         return TransformGroup(kmin=self.kmin, kmax=self.kmax,
                               kweight=self.kweight, dk=self.dk, dk2=self.dk2,
                               window=self.window, kstep=self.kstep,
-                              rmin=self.rmin, rmax=self.rmax,
+                              rmin=self.rmin, rmax=self.rmax, rbkg=self.rbkg,
                               dr=self.dr, dr2=self.dr2,
                               rwindow=self.rwindow, nfft=self.nfft,
                               fitspace=self.fitspace,
@@ -107,7 +176,7 @@ class TransformGroup(Group):
         self.k_ = self.kstep * arange(self.nfft, dtype='float64')
         self.r_ = self.rstep * arange(self.nfft, dtype='float64')
 
-    def _xafsft(self, chi, group=None, rmax_out=10, **kws):
+    def _xafsft(self, chi, group=None, rmax_out=10, with_chiq=False, **kws):
         "returns "
         for key, val in kws:
             if key == 'kw':
@@ -115,20 +184,36 @@ class TransformGroup(Group):
             setattr(self, key, val)
         self.make_karrays()
 
-        out = self.fftf(chi)
+        outr = self.fftf(chi)
 
         irmax = int(min(self.nfft/2, 1.01 + rmax_out/self.rstep))
 
         group = set_xafsGroup(group, _larch=self._larch)
         r   = self.rstep * arange(irmax)
-        mag = sqrt(out.real**2 + out.imag**2)
+        mag = sqrt(outr.real**2 + outr.imag**2)
         group.kwin  =  self.kwin[:len(chi)]
         group.r    =  r[:irmax]
-        group.chir =  out[:irmax]
+        group.chir =  outr[:irmax]
         group.chir_mag =  mag[:irmax]
-        group.chir_pha =  complex_phase(out[:irmax])
-        group.chir_re  =  out.real[:irmax]
-        group.chir_im  =  out.imag[:irmax]
+        group.chir_pha =  complex_phase(outr[:irmax])
+        group.chir_re  =  outr.real[:irmax]
+        group.chir_im  =  outr.imag[:irmax]
+        if self.rwin is None:
+            xmin = max(self.rbkg, self.rmin)
+            self.rwin = ftwindow(self.r_, xmin=xmin, xmax=self.rmax,
+                                 dx=self.dr, dx2=self.dr2, window=self.rwindow)
+        group.rwin = self.rwin[:irmax]
+
+        if with_chiq:
+            outq = self.fftr(outr)
+            qmax_out = self.kmax+2.0
+            group.q = np.linspace(0, qmax_out, int(1.05 + qmax_out/self.kstep))
+            nq = len(group.q)
+            group.chiq = outq[:nq]
+            group.chiq_mag = sqrt(outq.real**2 + outq.imag**2)[:nq]
+            group.chiq_re = outq.real[:nq]
+            group.chiq_im = outq.imag[:nq]
+            group.chiq_pha =  complex_phase(outq[:nq])
 
     def get_kweight(self):
         "if kweight is a list/tuple, use only the first one here"
@@ -154,9 +239,9 @@ class TransformGroup(Group):
         if self.kstep != self.__kstep or self.nfft != self.__nfft:
             self.make_karrays()
         if self.rwin is None:
-            self.rwin = ftwindow(self.r_, xmin=self.rmin, xmax=self.rmax,
+            xmin = max(self.rbkg, self.rmin)
+            self.rwin = ftwindow(self.r_, xmin=xmin, xmax=self.rmax,
                                  dx=self.dr, dx2=self.dr2, window=self.rwindow)
-
         cx = chir * self.rwin[:len(chir)]
         return xftr_fast(cx, kstep=self.kstep, nfft=self.nfft)
 
@@ -224,50 +309,136 @@ class TransformGroup(Group):
         return (out*self._cauchymask)[self._cauchyslice]
 
 class FeffitDataSet(Group):
-    def __init__(self, data=None, pathlist=None, transform=None,
-                 epsilon_k=None, _larch=None, **kws):
+    def __init__(self, data=None, paths=None, transform=None, epsilon_k=None,
+                 refine_bkg=False, model=None, pathlist=None,  _larch=None, **kws):
+
         self._larch = _larch
         Group.__init__(self, **kws)
+        self.refine_bkg = refine_bkg
+        if paths is None and pathlist is not None:
+            paths = pathlist
 
-        self.pathlist = pathlist
+        if isinstance(paths, dict):
+            self.paths = {key: copy(path) for key, path in paths.items()}
+        elif isinstance(paths, (list, tuple)):
+            self.paths = {path.label: copy(path) for path in paths}
+        else:
+            self.paths = {}
+        self.pathlist = list(self.paths.values())
 
-        self.data = data
         if transform is None:
             transform = TransformGroup()
+        else:
+            trasform = copy(transform)
         self.transform = transform
+
+        if model is None:
+            self.model = Group(__name__='Feffit Model for %s' % repr(data))
+            self.model.k = None
+        else:
+            self.model = model
+        # make datagroup from passed in data: copy of k, chi, delta_chi, epsilon_k
+        self.set_datagroup(data, epsilon_k=epsilon_k, refine_bkg=refine_bkg)
+
+    def set_datagroup(self, data, epsilon_k=None, refine_bkg=False):
+        "set the data group for the Dataset"
+        if data is None:
+            self.data = Group(__name__='Feffit DatasSet (no data)',
+                              groupname=None,filename=None,
+                              k=np.arange(401)/20.0, chi=np.zeros(401))
+            self.has_data = False
+        else:
+            self.data = Group(__name__='Feffit DatasSet from %s' % repr(data),
+                            groupname=getattr(data, 'groupname', repr(data)),
+                            filename=getattr(data, 'filename', repr(data)),
+                            k=data.k[:]*1.0, chi=data.chi[:]*1.0)
+            self.has_data = True
+        if hasattr(data, 'config'):
+            self.data.config = deepcopy(data.config)
+        else:
+            self.data.config = Group()
+        self.data.epsilon_k = getattr(data, 'epsilon_k', epsilon_k)
         if epsilon_k is not None:
             self.data.epsilon_k = epsilon_k
 
-        self.model = Group()
-        self.model.k = None
-        self.__chi = None
-        self.__prepared = False
+        dat_attrs = ['delta_chi', 'r', 'chir_mag', 'chir_re', 'chir_im']
+        if data is not None:
+            dat_attrs.extend(dir(data))
+        for attr in dat_attrs:
+            if attr not in ('feffit_history',) and not hasattr(self.data, attr):
+                setattr(self.data, attr, getattr(data, attr, None))
+        self.hashkey = None
+        self.__generate_hashkey()
+        self.bkg_spline = {}
+        self._chi = None
+        self._bkg = 0.0
+        self._prepared = False
+
+
+    def __generate_hashkey(self, other_hashkeys=None):
+        """generate hash for dataset"""
+        if self.hashkey is not None:
+            return
+        hlen = 7
+        dat = []
+        for aname in ('e0', 'ek0', 'rbkg', 'edge_step'):
+            dat.append(getattr(self.data, aname, 0.00))
+
+        for aname in ('energy', 'norm', 'bkg', 'chi'):
+            arr = getattr(self.data, aname, None)
+            if isinstance(arr, np.ndarray):
+                dat.extend([arr.min(), arr.max(), arr.mean(),
+                            (arr**2).mean(), len(arr)])
+                dat.extend(arr[:30:3])
+        s = "|".join([gformat(x) for x in dat])
+        self.hashkey = f"d{(b32hash(s)[:hlen].lower())}"
+
+        # may need to look for hash collisions: hlen=7 gives 34e9 keys
+        # collision are probably the same dataset, so just go with a
+        # random string
+        if other_hashkeys is not None:
+            while self.hashkey in other_hashkeys:
+                for delim in (':', ';', '&', '*', '#', '@'):
+                    s = delim.join([gformat(x) for x in dat])
+                    self.hashkey = f"d{(b32hash(s)[:hlen].lower())}"
+            while self.hashkey in other_hashkeys:
+                ntry += 1
+                if ntry > 1e6:
+                    ntry = 0
+                    hlen += 1
+                self.hashkey = f"d{random_varname(hlen)}"
 
     def __repr__(self):
         return '<FeffitDataSet Group: %s>' % self.__name__
 
     def __copy__(self):
         return FeffitDataSet(data=copy(self.data),
-                             pathlist=self.pathlist[:],
-                             transform=copy(self.transform),
+                             paths=self.paths,
+                             transform=self.transform,
+                             refine_bkg=self.refine_bkg,
+                             epsilon_k=self.data.epsilon_k,
+                             model=self.model,
                              _larch=self._larch)
 
     def __deepcopy__(self, memo):
         return FeffitDataSet(data=deepcopy(self.data),
-                             pathlist=self.pathlist[:],
-                             transform=deepcopy(self.transform),
+                             paths=self.paths,
+                             transform=self.transform,
+                             refine_bkg=self.refine_bkg,
+                             epsilon_k=self.data.epsilon_k,
+                             model=self.model,
                              _larch=self._larch)
 
-    def prepare_fit(self):
+    def prepare_fit(self, params, other_hashkeys=None):
         """prepare for fit with this dataset"""
-
         trans = self.transform
         trans.make_karrays()
         ikmax = int(1.01 + max(self.data.k)/trans.kstep)
 
         # ikmax = index_of(trans.k_, max(self.data.k))
         self.model.k = trans.k_[:ikmax]
-        self.__chi = interp(self.model.k, self.data.k, self.data.chi)
+        self.model.chi = np.zeros(len(self.model.k), dtype='float64')
+        self._chi = interp(self.model.k, self.data.k, self.data.chi)
         self.n_idp = 1 + 2*(trans.rmax-trans.rmin)*(trans.kmax-trans.kmin)/pi
 
         if getattr(self.data, 'epsilon_k', None) is not None:
@@ -276,33 +447,62 @@ class FeffitDataSet(Group):
                 eps_k = interp(self.model.k, self.data.k, self.data.epsilon_k)
             self.set_epsilon_k(eps_k)
         else:
-            self.estimate_noise(chi=self.__chi, rmin=15.0, rmax=30.0)
-            # uncertainty in chi(k) from autobk or other source
-            if hasattr(self.data, 'delta_chi'):
-                if isinstance(self.epsilon_k, (list, tuple)):
-                    eps_ave = 0.
-                    for eps in self.epsilon_k:
-                        eps_ave += eps
-                    self.epsilon_k = eps_ave/len(self.epsilon_k)
-                _dchi = interp(self.model.k, self.data.k, self.data.delta_chi)
-                eps_k = np.sqrt(_dchi**2 + self.epsilon_k**2)
-                self.set_epsilon_k(eps_k)
+            self.estimate_noise(chi=self._chi, rmin=15.0, rmax=30.0)
 
-        # for each path in the pathlist, setup the Path Parameters to
-        # use the current fiteval namespace
-        for path in self.pathlist:
-            path.create_path_params()
+            # if delta_chi (uncertainty in chi(k) from autobk or other source)
+            # exists, add it in quadrature to high-k noise estimate, and
+            # update epsilon_k to be this value
+            autobk_delta_chi(self.data)
+            if hasattr(self.data, 'delta_chi'):
+                cur_eps_k = getattr(self, 'epsilon_k', 0.0)
+                if isinstance(cur_eps_k, (list, tuple)):
+                    eps_ave = 0.
+                    for eps in cur_eps_k:
+                        eps_ave += eps
+                    cur_eps_k = eps_ave/len(cur_eps_k)
+
+                _dchi = self.data.delta_chi
+                if _dchi is not None:
+                    if isinstance(_dchi, np.ndarray):
+                        nchi = len(self.data.k)
+                        if len(_dchi) != nchi:
+                            _dchi = np.concatenate((_dchi, np.zeros(nchi)))[:nchi]
+                        _dchi = interp(self.model.k, self.data.k, _dchi)
+                    self.set_epsilon_k(np.sqrt(_dchi**2 + cur_eps_k**2))
+
+        self.__generate_hashkey(other_hashkeys=other_hashkeys)
+        # for each path in the list of paths, setup the Path Parameters
+        # to use the current Parameters namespace
+        if isinstance(params, Group):
+            params = group2params(params)
+        for label, path in self.paths.items():
+            path.create_path_params(params=params, dataset=self.hashkey)
             if path.spline_coefs is None:
                 path.create_spline_coefs()
 
-        self.__prepared = True
+        self.bkg_spline = {}
+        if self.refine_bkg:
+            trans.rbkg = max(trans.rbkg, trans.rmin)
+            trans.rmin = trans.rstep
+            self.n_idp = 1 + 2*(trans.rmax)*(trans.kmax-trans.kmin)/pi
+            nspline = 1 + round(2*(trans.rbkg)*(trans.kmax-trans.kmin)/pi)
+            knots_k = np.linspace(trans.kmin, trans.kmax, nspline)
+            # np.linspace(trans.kmax, trans.kmax+trans.kstep/10.0, 3)))
+            knots_y = np.linspace(-1e-4, 1.e-4, nspline)
+            knots, coefs, order = splrep(knots_k, knots_y, k=3)
+            self.bkg_spline = {'knots': knots, 'coefs': coefs,
+                               'nspline': nspline, 'order':order}
+            for i in range(nspline):
+                params.add(f'bkg{i:02d}_{self.hashkey}', value=0, vary=True)
+        self._prepared = True
 
 
     def estimate_noise(self, chi=None, rmin=15.0, rmax=30.0, all_kweights=True):
         """estimage noise in a chi spectrum from its high r components"""
         trans = self.transform
         trans.make_karrays()
-        if chi is None: chi = self.__chi
+        if chi is None:
+            chi = self.data.chi
 
         save = trans.rmin, trans.rmax, trans.fitspace
 
@@ -343,6 +543,7 @@ class FeffitDataSet(Group):
 
     def set_epsilon_k(self, eps_k):
         """set epsilon_k and epsilon_r -- ucertainties in chi(k) and chi(R)"""
+        eps_k = remove_nans(eps_k, 0.001)
         trans = self.transform
         all_kweights = isinstance(trans.kweight, Iterable)
         if isinstance(trans.kweight, Iterable):
@@ -364,27 +565,44 @@ class FeffitDataSet(Group):
             if isinstance(eps_r, np.ndarray): eps_r = eps_r.mean()
             self.epsilon_r = eps_r
 
+        # check for nans
+        self.epsilon_k = remove_nans(self.epsilon_k, eps_k, default=0.0001)
+        self.epsilon_r = remove_nans(self.epsilon_r, eps_r, default=0.0001)
 
-    def _residual(self, paramgroup, data_only=False, **kws):
+
+
+    def _residual(self, params, data_only=False, **kws):
         """return the residual for this data set
         residual = self.transform.apply(data_chi - model_chi)
-        where model_chi is the result of ff2chi(pathlist)
+        where model_chi is the result of ff2chi(paths)
         """
         if not isNamedClass(self.transform, TransformGroup):
             return
-        if not self.__prepared:
-            self.prepare_fit()
+        if not self._prepared:
+            self.prepare_fit(params)
 
-        ff2chi(self.pathlist, paramgroup=paramgroup, k=self.model.k,
+        ff2chi(self.paths, params=params, k=self.model.k,
                 _larch=self._larch, group=self.model)
+
+        self._bkg = 0.0
+        if self.refine_bkg:
+            knots = self.bkg_spline['knots']
+            order = self.bkg_spline['order']
+            nspline = self.bkg_spline['nspline']
+            coefs = []
+            for i in range(nspline):
+                parname = f'bkg{i:02d}_{self.hashkey}'
+                par = params[parname]
+                coefs.append(par.value)
+            self._bkg = splev(self.model.k, [knots, coefs, order])
 
         eps_k = self.epsilon_k
         if isinstance(eps_k, np.ndarray):
             eps_k[np.where(eps_k<1.e-12)[0]] = 1.e-12
 
-        diff  = (self.__chi - self.model.chi)
-        if data_only:  # for extracting transformed data separately from residual
-            diff  = self.__chi
+        diff  = self._chi - self._bkg
+        if not data_only:  # data_only for extracting transformed data
+            diff -= self.model.chi
         trans = self.transform
         k     = trans.k_[:len(diff)]
 
@@ -409,7 +627,7 @@ class FeffitDataSet(Group):
             else:
                 cwt = trans.cwt(diff/eps_k, kweight=trans.kweight)
                 return realimag(cwt).ravel()
-        else: # 'r' space
+        else: # 'r' or 'q' space
             out = []
             if all_kweights:
                 chir = [trans.fftf(diff, kweight=kw) for kw in trans.kweight]
@@ -423,7 +641,7 @@ class FeffitDataSet(Group):
                 for i, chir_ in enumerate(chir):
                     chir_ = chir_ / (eps_r[i])
                     out.append(realimag(chir_[irmin:irmax]))
-            else:
+            else: # 'q' space
                 chiq = [trans.fftr(c)/eps for c, eps in zip(chir, eps_r)]
                 iqmin = int(max(0, 0.01 + trans.kmin/trans.kstep))
                 iqmax = int(min(trans.nfft/2,  0.01 + trans.kmax/trans.kstep))
@@ -431,23 +649,68 @@ class FeffitDataSet(Group):
                     out.append( realimag(chiq_[iqmin:iqmax])[::2])
             return np.concatenate(out)
 
-    def save_ffts(self, rmax_out=10, path_outputs=True):
-        "save fft outputs"
-        xft = self.transform._xafsft
-        xft(self.__chi,   group=self.data,  rmax_out=rmax_out)
-        xft(self.model.chi, group=self.model, rmax_out=rmax_out)
-        if path_outputs:
-            for p in self.pathlist:
-                xft(p.chi, group=p, rmax_out=rmax_out)
+    def save_outputs(self, rmax_out=10, path_outputs=True, with_chiq=True):
+        "save fft outputs, and may also map a refined _bkg to the data chi(k) arrays"
+        def xft(dgroup):
+            self.transform._xafsft(dgroup.chi, group=dgroup,
+                                   rmax_out=rmax_out, with_chiq=with_chiq)
+        xft(self.data)
+        xft(self.model)
+        if self.refine_bkg:
+            self.data.bkgk = IUSpline(self.model.k, self._bkg)(self.data.k)
+            gname = getattr(self.data, 'groupname', repr(self.data))
+            fname = getattr(self.data, 'filename', repr(self.data))
+            label = f"defined background data for '{gname}'"
+            self.data_rebkg = Group(__name__=label, groupname=gname,
+                                    filename=fname, k=self.data.k[:],
+                                    chi=self.data.chi-self.data.bkgk)
+            xft(self.data_rebkg)
 
-def feffit_dataset(data=None, pathlist=None, transform=None,
-                   epsilon_k=None, _larch=None):
+        if path_outputs:
+            for path in self.paths.values():
+                xft(path)
+
+    def csv_path_report(self, params, format=True):
+        """make a CVS table report for the list of paths after a fit"""
+        table_keys = ['filename', 'geom', 'reff', 'degen', 's02','e0', 'r',
+                      'sigma2', 'third', 'fourth', 'ei',
+                      's02_expr', 'e0_expr', 'r_expr',
+                     'sigma2_expr','third_expr', 'fourth_expr', 'ei_expr']
+        headers = ['filename', 'geometry', 'R_eff', 'Degen', 'N*S02','E0', 'R',
+                   'sigma2', 'third',  'fourth', 'Ei',
+                   'N*S02 Expr', 'Degen  Expr', 'E0 Expr', 'R Expr',
+                   'sigma2 Expr', 'third Expr', 'fourth Expr', 'Ei Expr']
+        table = []
+        for path in self.pathlist:
+            if path.dataset is None:
+                path.dataset = self.hashkey
+            path.params = params
+            dictvals =  path.dict_report()
+            table.append([dictvals[key] for key in table_keys])
+
+        if format:
+            if tabulate is None:
+                out = [', '.join(headers)]
+                for t in table:
+                    out.append(', '.join(t))
+                out = '\n'.join(out)
+            else:
+                out = tabulate(table, headers=headers,
+                                tablefmt='tsv').replace('\t', ', ')
+        else:
+            out = [headers]
+            out.extend(table)
+        return out
+
+
+def feffit_dataset(data=None, paths=None, transform=None, refine_bkg=False,
+                   epsilon_k=None, pathlist=None, _larch=None):
     """create a Feffit Dataset group.
 
      Parameters:
      ------------
       data:      group containing experimental EXAFS (needs arrays 'k' and 'chi').
-      pathlist:  list of FeffPath groups, as created from feffpath()
+      paths:     dict of {label: FeffPathGroup}, using FeffPathGroup created by feffpath()
       transform: Feffit Transform group.
       epsilon_k: Uncertainty in data (either single value or array of
                  same length as data.k)
@@ -456,10 +719,9 @@ def feffit_dataset(data=None, pathlist=None, transform=None,
      ----------
       a Feffit Dataset group.
 
-
     """
-    return FeffitDataSet(data=data, pathlist=pathlist,
-                         transform=transform, _larch=_larch)
+    return FeffitDataSet(data=data, paths=paths, transform=transform, epsilon_k=epsilon_k,
+                         refine_bkg=refine_bkg, pathlist=pathlist, _larch=_larch)
 
 def feffit_transform(_larch=None, **kws):
     """create a feffit transform group
@@ -487,7 +749,12 @@ def feffit_transform(_larch=None, **kws):
     """
     return TransformGroup(_larch=_larch, **kws)
 
-def feffit(paramgroup, datasets, rmax_out=10, path_outputs=True, _larch=None, **kws):
+def _feffit_resid(params, datasets=None, **kwargs):
+    """ this is the residual function for feffit"""
+    return concatenate([d._residual(params) for d in datasets])
+
+def feffit(paramgroup, datasets, rmax_out=10, path_outputs=True,
+           fix_unused_variables=True,  _larch=None, **kws):
     """execute a Feffit fit: a fit of feff paths to a list of datasets
 
     Parameters:
@@ -496,7 +763,8 @@ def feffit(paramgroup, datasets, rmax_out=10, path_outputs=True, _larch=None, **
       datasets:     Feffit Dataset group or list of Feffit Dataset group.
       rmax_out:     maximum R value to calculate output arrays.
       path_output:  Flag to set whether all Path outputs should be written.
-
+      fix_unused_variables: Flag for whether to set `vary=False` for unused
+                    variable parameters.  Otherwise, a warning will be printed.
     Returns:
     ---------
       a fit results group.  This will contain subgroups of:
@@ -517,33 +785,65 @@ def feffit(paramgroup, datasets, rmax_out=10, path_outputs=True, _larch=None, **
         chir_re      real part of chi(R).
         chir_im      imaginary part of chi(R).
     """
+    fit_kws = dict(gtol=1.e-6, ftol=1.e-6, xtol=1.e-6, epsfcn=1.e-10)
+    if 'tol' in kws:
+        tol = kws.pop('tol')
+        fit_kws['gtol'] = fit_kws['ftol'] = fit_kws['xtol'] = tol
 
+    fit_kws.update(kws)
 
-    def _resid(params, datasets=None, paramgroup=None, **kwargs):
-        """ this is the residual function"""
-        params2group(params, paramgroup)
-        return concatenate([d._residual(paramgroup) for d in datasets])
+    work_paramgroup = deepcopy(paramgroup)
+    for pname in dir(paramgroup):  # explicitly copy 'skip'!
+        wpar = getattr(work_paramgroup, pname)
+        opar = getattr(paramgroup, pname)
+        if isinstance(wpar, Parameter):
+            setattr(wpar, 'skip', getattr(opar, 'skip', False))
+
+    params = group2params(work_paramgroup)
 
     if isNamedClass(datasets, FeffitDataSet):
         datasets = [datasets]
 
-    params = group2params(paramgroup, _larch=_larch)
-
+    # we need unique dataset hashes if refine_bkg is used
+    dset_hashkeys = []
     for ds in datasets:
         if not isNamedClass(ds, FeffitDataSet):
             print( "feffit needs a list of FeffitDataSets")
             return
-        ds.prepare_fit()
+        ds.prepare_fit(params=params, other_hashkeys=dset_hashkeys)
+        dset_hashkeys.append(ds.hashkey)
+        # print('Feffit , prepared dataset for fit ', ds, ds.hashkey)
+    # try to identify variable Parameters that are not actually used
+    vars, exprs = [], []
+    for p in params.values():
+        if p.vary:
+            nam = p.name
+            if not any([nam.startswith('bkg') and
+                        nam.endswith(ds.hashkey) for ds in datasets]):
+                vars.append(nam)
+        elif p.expr is not None:
+            exprs.append(p.expr)
 
-    fit = Minimizer(_resid, params,
-                    fcn_kws=dict(datasets=datasets,
-                                 paramgroup=paramgroup),
-                    scale_covar=True, **kws)
+    for expr in exprs:
+         for node in ast.walk(ast.parse(expr)):
+                if isinstance(node, ast.Name):
+                    if node.id in vars:
+                        vars.remove(node.id)
+    if len(vars) > 0:
+        if fix_unused_variables:
+            for v in vars:
+                params[v].vary = False
+        else:
+            vlist = ', '.join(vars)
+            print(f"Feffit Warning: unused variables: {vlist}")
+
+    # run fit
+    fit = Minimizer(_feffit_resid, params, fcn_kws=dict(datasets=datasets),
+                    scale_covar=False, **fit_kws)
 
     result = fit.leastsq()
-
-    params2group(result.params, paramgroup)
-    dat = concatenate([d._residual(paramgroup, data_only=True) for d in datasets])
+    dat = concatenate([d._residual(result.params, data_only=True)
+                       for d in datasets])
 
     n_idp = 0
     for ds in datasets:
@@ -552,7 +852,7 @@ def feffit(paramgroup, datasets, rmax_out=10, path_outputs=True, _larch=None, **
     # here we rescale chi-square and reduced chi-square to n_idp
     npts =  len(result.residual)
     chi_square  = result.chisqr * n_idp*1.0 / npts
-    chi_reduced = chi_square/(n_idp*1.0 - result.nvarys)
+    chi2_reduced = chi_square/(n_idp*1.0 - result.nvarys)
     rfactor = (result.residual**2).sum() / (dat**2).sum()
     # calculate 'aic', 'bic' rescaled to n_idp
     # note that neg2_loglikel is -2*log(likelihood)
@@ -560,73 +860,50 @@ def feffit(paramgroup, datasets, rmax_out=10, path_outputs=True, _larch=None, **
     aic = neg2_loglikel + 2 * result.nvarys
     bic = neg2_loglikel + np.log(n_idp) * result.nvarys
 
-
-    # With scale_covar = True, Minimizer() scales the uncertainties
-    # by reduced chi-square assuming params.nfree is the correct value
-    # for degrees-of-freedom. But n_idp-params.nvarys is a better measure,
-    # so we rescale uncertainties here.
-
-    covar = getattr(result, 'covar', None)
-    # print("COVAR " , covar)
-    _larch.symtable._sys.fiteval = result.params._asteval
-
-    if covar is not None:
-        err_scale = (result.nfree / (n_idp - result.nvarys))
-        for name in result.var_names:
-            p = result.params[name]
-            if isParameter(p) and p.vary:
-                p.stderr *= sqrt(err_scale)
-
-        # next, propagate uncertainties to constraints and path parameters.
-        result.covar *= err_scale
-        vsave, vbest = {}, []
-
-        # 1. save current params
-        for vname in result.var_names:
-            par = result.params[vname]
-            vsave[vname] = par
-            vbest.append(par.value)
-
-        # 2. get correlated uncertainties, set params accordingly
-        uvars = correlated_values(vbest, result.covar)
-        # 3. evaluate constrained params, save stderr
-        for nam, obj in result.params.items():
-            eval_stderr(obj, uvars,  result.var_names, result.params)
-
-        # 3. evaluate path params, save stderr
-        for ds in datasets:
-            for p in ds.pathlist:
-                p.store_feffdat()
-                for pname in ('degen', 's02', 'e0', 'ei',
-                              'deltar', 'sigma2', 'third', 'fourth'):
-                    obj = p.params[PATHPAR_FMT % (pname, p.label)]
-                    eval_stderr(obj, uvars,  result.var_names, result.params)
-
-        # restore saved parameters again
-        for vname in result.var_names:
-            # setattr(params, vname, vsave[vname])
-            params[vname] = vsave[vname]
-
-        # clear any errors evaluting uncertainties
-        if _larch is not None and (len(_larch.error) > 0):
-            _larch.error = []
+    propagate_uncertainties(result, datasets, _larch=_larch)
 
     # reset the parameters group with the newly updated uncertainties
-    params2group(result.params, paramgroup)
+    params2group(result.params, work_paramgroup)
 
     # here we create outputs arrays for chi(k), chi(r):
     for ds in datasets:
-        ds.save_ffts(rmax_out=rmax_out, path_outputs=path_outputs)
+        ds.save_outputs(rmax_out=rmax_out, path_outputs=path_outputs)
 
-    out = Group(name='feffit results', datasets=datasets,
-                fitter=fit, fit_details=result, chi_square=chi_square,
-                n_independent=n_idp, chi_reduced=chi_reduced,
-                rfactor=rfactor, aic=aic, bic=bic, covar=covar)
+    out = Group(name='feffit results', params=result.params,
+                paramgroup=work_paramgroup, fit_kws=fit_kws,
+                datasets=datasets, fit_details=result,
+                chi_square=chi_square, n_independent=n_idp,
+                chi2_reduced=chi2_reduced, redchi=chi2_reduced,
+                rfactor=rfactor, aic=aic, bic=bic, covar=result.covar)
 
     for attr in ('params', 'nvarys', 'nfree', 'ndata', 'var_names', 'nfev',
                  'success', 'errorbars', 'message', 'lmdif_message'):
         setattr(out, attr, getattr(result, attr, None))
     return out
+
+def feffit_conf_map(result, xpar, ypar, nsamples=41, nsigma=3.5):
+    """
+    return 2d map of confidence interval (sigma values) for a pair of variables from feffit
+
+    """
+    def show_progress(i, imax):
+        if i > (imax-1):
+            print('done.')
+        elif i % round(imax//10) == 0:
+            print(f"{i}/{imax}", flush=True, end=', ')
+
+    fitter = Minimizer(_feffit_resid, result.params,
+                       fcn_kws=dict(datasets=result.datasets),
+                       scale_covar=False, **result.fit_kws)
+
+    xvals, yvals, chi2_map = conf_interval2d(fitter, result.fit_details, xpar, ypar,
+                                             nsamples, nsamples, nsigma=nsigma, chi2_out=True)
+
+    chi2_map = chi2_map * result.n_independent / result.fit_details.ndata
+    chisqr0 = min(result.chi_square, chi2_map.min())
+    sigma_map = np.sqrt((chi2_map-chisqr0)/result.chi2_reduced)
+    return xvals, yvals, sigma_map
+
 
 
 def feffit_report(result, min_correl=0.1, with_paths=True, _larch=None):
@@ -654,6 +931,9 @@ def feffit_report(result, min_correl=0.1, with_paths=True, _larch=None):
         print( 'must pass output of feffit()!')
         return
 
+    path_hashkeys = []
+    for ds in datasets:
+        path_hashkeys.extend([p.hashkey for p in ds.paths.values()])
     topline = '=================== FEFFIT RESULTS ===================='
     header = '[[%s]]'
     varformat  = '   %12s = %s +/-%s   (init= %s)'
@@ -661,91 +941,57 @@ def feffit_report(result, min_correl=0.1, with_paths=True, _larch=None):
     exprformat = '   %12s = %s +/-%s  = \'%s\''
     out = [topline, header % 'Statistics']
 
-    out.append('   nvarys, npts       =  %i, %i' % (result.nvarys,
-                                                   result.ndata))
-    out.append('   n_independent      =  %.3f'  % (result.n_independent))
-    out.append('   chi_square         = %s'  % gformat(result.chi_square))
-    out.append('   reduced chi_square = %s'  % gformat(result.chi_reduced))
-    out.append('   r-factor           = %s'  % gformat(result.rfactor))
-    out.append('   Akaike info crit   = %s'  % gformat(result.aic))
-    out.append('   Bayesian info crit = %s'  % gformat(result.bic))
-    out.append(' ')
+    def getval(attr):
+        return getfloat_attr(result, attr)
 
-    if len(datasets) == 1:
-        out.append(header % 'Data')
-    else:
-        out.append(header % 'Datasets (%i)' % len(datasets))
-    for i, ds in enumerate(datasets):
-        tr = ds.transform
-        if len(datasets) > 1:
-            out.append(' dataset %i:' % (i+1))
-        if isinstance(tr.kweight, Iterable):
-            if isinstance(ds.epsilon_k[0], np.ndarray):
-                msg = []
-                for eps in ds.epsilon_k:
-                    msg.append('Array(mean=%s, std=%s)' % (gformat(eps.mean()).strip(),
-                                                           gformat(eps.std()).strip()))
-                eps_k = ', '.join(msg)
-            else:
-                eps_k = ', '.join([gformat(eps).strip() for eps in ds.epsilon_k])
-            eps_r = ', '.join([gformat(eps).strip() for eps in ds.epsilon_r])
-            kweigh = ', '.join(['%i' % kwe for kwe in tr.kweight])
-        else:
-            if isinstance(ds.epsilon_k, np.ndarray):
-                eps_k = 'Array(mean=%s, std=%s)' % (gformat(ds.epsilon_k.mean()).strip(),
-                                                    gformat(ds.epsilon_k.std()).strip())
-            else:
-                eps_k = gformat(ds.epsilon_k)
-            eps_r = gformat(ds.epsilon_r).strip()
-            kweigh = '%i' % tr.kweight
-        out.append('   fit space          = \'%s\''  % (tr.fitspace))
-        out.append('   r-range            = %.3f, %.3f' % (tr.rmin, tr.rmax))
-        out.append('   k-range            = %.3f, %.3f' % (tr.kmin, tr.kmax))
-        kwin = '   k window, dk       = \'%s\', %.3f'   % (tr.window, tr.dk)
-        if tr.dk2 is not None:
-            kwin = "%s, %.3f" % (kwin, tr.dk2)
-        out.append(kwin)
-        pathfiles = [p.filename for p in ds.pathlist]
-        out.append('   paths used in fit  = %s' % (repr(pathfiles)))
-        out.append('   k-weight           = %s' % kweigh)
-        out.append('   epsilon_k          = %s'  % eps_k)
-        out.append('   epsilon_r          = %s'  % eps_r)
-        out.append('   n_independent      = %.3f'  % (ds.n_idp))
-        #
-    out.append(' ')
-    out.append(header % 'Variables')
+    def add_string(label, value, llen=20):
+        if len(label) < llen:
+            label = (label + ' '*llen)[:llen]
+        out.append(f"  {label} = {value}")
 
-    # exprs = []
+    add_string('n_function_calls', getval('nfev'))
+    add_string('n_variables', getval('nvarys'))
+    add_string('n_data_points', getval('ndata'))
+    add_string('n_independent', getval('n_independent'))
+    add_string('chi_square', getval('chi_square'))
+    add_string('reduced chi_square', getval('chi2_reduced'))
+    add_string('r-factor',  getval('rfactor'))
+    add_string('Akaike info crit', getval('aic'))
+    add_string('Bayesian info crit', getval('bic'))
+
+    out.append(' ')
+    out.append(header % 'Parameters')
+    needs_uncertainties = False
     for name, par in params.items():
-        # var = getattr(params, name)
-        # print(name, par, dir(par))
-        if len(name) < 14:
-            name = (name + ' '*14)[:14]
+        if par.stderr is None and (par.vary or
+                                   par.expr not in (None, '', 'None')):
+            needs_uncertainties = True
+    if needs_uncertainties:
+        propagate_uncertainties(result, datasets, _larch=_larch)
+
+    for name, par in params.items():
+        if any([name.endswith('_%s' % phash) for phash in path_hashkeys]):
+            continue
         if isParameter(par):
             if par.vary:
                 stderr = 'unknown'
                 if par.stderr is not None:
-                    stderr = gformat(par.stderr)
-                out.append(varformat % (name, gformat(par.value),
-                                        stderr, gformat(par.init_value)))
+                    stderr = gfmt(par.stderr)
+                add_string(name, f"{gfmt(par.value)} +/-{stderr}  (init={gfmt(par.init_value)})")
 
             elif par.expr is not None:
                 stderr = 'unknown'
                 if par.stderr is not None:
-                    stderr = gformat(par.stderr)
-                out.append(exprformat % (name, gformat(par.value),
-                                         stderr, par.expr))
+                    stderr = gfmt(par.stderr)
+                add_string(name, f"{gfmt(par.value)} +/-{stderr}  = '{par.expr}'")
             else:
-                out.append(fixformat % (name, gformat(par.value)))
-    # if len(exprs) > 0:
-    #     out.append(header % 'Constraint Expressions')
-    #     out.extend(exprs)
+                add_string(name, f"{gfmt(par.value)} (fixed)")
 
     covar_vars = result.var_names
     if len(covar_vars) > 0:
         out.append(' ')
         out.append(header % 'Correlations' +
-                   '    (unreported correlations are < % .3f)' % min_correl)
+                   ' (unreported correlations are < % .3f)' % min_correl)
         correls = {}
         for i, name in enumerate(covar_vars):
             par = params[name]
@@ -759,19 +1005,72 @@ def feffit_report(result, min_correl=0.1, with_paths=True, _larch=None):
         sort_correl = sorted(correls.items(), key=lambda it: abs(it[1]))
         sort_correl.reverse()
         for name, val in sort_correl:
-            if abs(val) < min_correl:
-                break
-            if len(name) < 20:
-                name = (name + ' '*20)[:20]
-            out.append('   %s = % .3f' % (name, val))
+            if abs(val) > min_correl:
+                vv = f"{val:+.3f}".replace('+', ' ')
+                add_string(name, vv)
 
-    if with_paths:
-        out.append(' ')
-        out.append(header % 'Paths')
-        for ids, ds in enumerate(datasets):
-            if len(datasets) > 1:
-                out.append(' dataset %i:' % (ids+1))
-            for p in ds.pathlist:
-                out.append('%s\n' % p.report())
+    out.append(' ')
+    for i, ds in enumerate(datasets):
+        if not hasattr(ds, 'epsilon_k'):
+            ds.prepare_fit(params)
+        tr = ds.transform
+        if isinstance(tr.kweight, Iterable):
+            if isinstance(ds.epsilon_k[0], np.ndarray):
+                msg = []
+                for eps in ds.epsilon_k:
+                    msg.append('Array(mean=%s, std=%s)' % (gfmt(eps.mean()).strip(),
+                                                           gfmt(eps.std()).strip()))
+                eps_k = ', '.join(msg)
+            else:
+                eps_k = ', '.join([gfmt(eps).strip() for eps in ds.epsilon_k])
+            eps_r = ', '.join([gfmt(eps).strip() for eps in ds.epsilon_r])
+            kweigh = ', '.join(['%i' % kwe for kwe in tr.kweight])
+            eps_k = eps_k.strip()
+            eps_r = eps_r.strip()
+            kweigh = kweigh.strip()
+        else:
+            if isinstance(ds.epsilon_k, np.ndarray):
+                eps_k = 'Array(mean=%s, std=%s)' % (gfmt(ds.epsilon_k.mean()).strip(),
+                                                    gfmt(ds.epsilon_k.std()).strip())
+            else:
+                eps_k = gfmt(ds.epsilon_k).strip()
+            eps_r = gfmt(ds.epsilon_r).strip()
+            kweigh = '%i' % tr.kweight
+        extra = f" {i+1} of {len(datasets)}" if len(datasets) > 1 else ""
+
+        out.append(f"[[Dataset{extra}]]")
+        add_string('unique_id', f"'{ds.hashkey}'")
+        add_string('fit space', f"'{tr.fitspace}'")
+        if ds.refine_bkg:
+            add_string('r_bkg (refine bkg)', f"{tr.rbkg:.3f}")
+        add_string('r-range', f"{tr.rmin:.3f}, {tr.rmax:.3f}")
+        add_string('k-range', f"{tr.kmin:.3f}, {tr.kmax:.3f}")
+        kwin = f"'{tr.window}', {tr.dk:.3f}"
+        if tr.dk2 is not None:
+            kwin += f", {tr.dk2:.3f}"
+        add_string('k window, dk', kwin)
+        pathfiles = repr([p.filename for p in ds.paths.values()])
+        add_string('paths used in fit', pathfiles)
+        add_string('k-weight', kweigh)
+        add_string('epsilon_k', eps_k)
+        add_string('epsilon_r', eps_r)
+        add_string('n_independent', f"{ds.n_idp:.3f}")
+        #
+
+        if with_paths:
+            for label, path in ds.paths.items():
+                if path.dataset is None:
+                    path.dataset = ds.hashkey
+                path.params = result.params
+                path.store_feffdat()
+
+            out.append(' ')
+            out.append(header % 'Paths')
+            for label, path in ds.paths.items():
+                if path.dataset is None:
+                    path.dataset = ds.hashkey
+                path.params = result.params
+                path.store_feffdat()
+                out.append('%s\n' % path.report())
     out.append('='*len(topline))
     return '\n'.join(out)

@@ -5,13 +5,12 @@ build American Mineralogist Crystal Structure Databse (amcsd)
 
 import os
 import requests
+import atexit
 import numpy as np
 from itertools import groupby
-from distutils.version import StrictVersion
-
 import larch
 from .xrd_fitting import peaklocater
-from .xrd_cif import create_cif, SPACEGROUPS
+from .xrd_cif import create_xrdcif, SPACEGROUPS
 from .xrd_tools import lambda_from_E
 
 import json
@@ -82,7 +81,7 @@ QAXIS = np.arange(QMIN, QMAX+QSTEP, QSTEP)
 ENERGY = 19000 ## units eV
 _cifdb = None
 
-def get_cifdb(dbname='amcsd_cif.db', _larch=None):
+def get_cifdb(dbname='amcsd_cif0.db', _larch=None):
     global _cifdb
     if _cifdb is None:
         _cifdb = cifDB(dbname=dbname)
@@ -118,11 +117,14 @@ def iscifDB(dbname):
     result = False
     try:
         engine = make_engine(dbname)
-        meta = MetaData(engine)
-        meta.reflect()
+        meta = MetaData()
+        meta.reflect(bind=engine)
         result = all([t in meta.tables for t in _tables])
     except:
         pass
+    finally:
+        if engine is not None:
+            engine.dispose()
     return result
 
 
@@ -150,6 +152,7 @@ class cifDB(object):
         self.dbname = self.dbname
         self.engine = make_engine(self.dbname)
         self.conn = self.engine.connect()
+
         kwargs = {}
         if read_only:
             kwargs = {'autoflush': True, 'autocommit':False}
@@ -160,8 +163,8 @@ class cifDB(object):
         else:
             self.session = sessionmaker(bind=self.engine, **kwargs)()
 
-        self.metadata =  MetaData(self.engine)
-        self.metadata.reflect()
+        self.metadata =  MetaData()
+        self.metadata.reflect(bind=self.engine)
         tables = self.tables = self.metadata.tables
 
         ## Load tables
@@ -183,7 +186,7 @@ class cifDB(object):
         self.ciftbl  = Table('ciftbl', self.metadata)
 
         self.axis = np.array([float(q[0]) for q in self.query(self.qtbl.c.q).all()])
-
+        atexit.register(self.close)
 
     def query(self, *args, **kws):
         "generic query"
@@ -195,9 +198,8 @@ class cifDB(object):
         self.session.close()
 
     def create_cifdb(self,name=None,verbose=False):
-
         if name is None:
-            self.dbname = 'amcsd%02d.db'
+            self.dbname = 'amcsd_cif0.db'
             counter = 0
             while os.path.exists(self.dbname % counter):
                 counter += 1
@@ -357,7 +359,7 @@ class cifDB(object):
         for spgrp_no in SPACEGROUPS.keys():
             for spgrp_name in SPACEGROUPS[spgrp_no]:
                 try:
-                    def_spgp.execute(iuc_id=spgrp_no,hm_notation=spgrp_name)
+                    def_spgp.execute(iuc_id=spgrp_no, hm_notation=spgrp_name)
                 except:
                     if verbose:
                         print('Duplicate: %s %s' % (spgrp_no,spgrp_name))
@@ -397,9 +399,9 @@ class cifDB(object):
         if url:
             cifstr = requests.get(ciffile).text
         else:
-            with open(ciffile,'r') as file:
-                cifstr = str(file.read())
-        cif = create_cif(text=cifstr)
+            with open(ciffile,'rb') as file:
+                cifstr = str(file.read().decode('utf-8'))
+        cif = create_xrdcif(text=cifstr)
 
         if cif.id_no is None:
             cif_no = 99999
@@ -626,9 +628,7 @@ class cifDB(object):
 ##################################################################################
 
     def amcsd_info(self, amcsd_id, no_qpeaks=None, ciffile=None):
-
         mineral_id,iuc_id = self.cif_by_amcsd(amcsd_id,only_ids=True)
-
         mineral_name = self.search_for_mineral(minid=mineral_id)[0].mineral_name
         authors      = self.author_by_amcsd(amcsd_id)
 
@@ -640,7 +640,7 @@ class cifDB(object):
             print(' ===================== ')
         print(' AMCSD: %i' % amcsd_id)
         print(' Name: %s' % mineral_name)
-        print(' %s' % self.composition_by_amcsd(amcsd_id,string=True))
+        print(' %s' % self.composition_by_amcsd(amcsd_id))
         try:
             print(' Space Group No.: %s (%s)' % (iuc_id,self.symm_id(iuc_id)))
         except:
@@ -746,7 +746,7 @@ class cifDB(object):
         qaxis = self.axis[imin:imax]
         stepq = (qaxis[1]-qaxis[0])
 
-        amcsd, q_amcsd = self.match_q(list=list, qmin=qmin, qmax=qmax)
+        amcsd, q_amcsd = self.match_qc(list=list, qmin=qmin, qmax=qmax)
 
         ## Re-bins data if different step size is specified
         if qstep > stepq:
@@ -818,7 +818,6 @@ class cifDB(object):
                 amcsd_incld += [amcsd_id]
             else:
                 amcsd_excld += [amcsd_id]
-
         return amcsd_incld
 
 
@@ -1329,4 +1328,4 @@ def read_cif(filename=None, amcsd_id=None, _larch=None):
     CIF representation
     """
     cifdb = get_cifdb(_larch=_larch)
-    return create_cif(filename=filename, cifdb=cifdb, amcsd_id=amcsd_id)
+    return create_xrdcif(filename=filename, cifdb=cifdb, amcsd_id=amcsd_id)

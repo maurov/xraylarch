@@ -4,14 +4,15 @@
 
 import numpy as np
 from scipy.signal import deconvolve
-from larch import parse_group_args
+from larch.larchlib import parse_group_args, Make_CallArgs
 
 from larch.math import (gaussian, lorentzian, interp,
                         index_of, index_nearest, remove_dups,
                         savitzky_golay)
 
-from .xafsutils import set_xafsGroup
+from .xafsutils import set_xafsGroup, TINY_ENERGY
 
+@Make_CallArgs(["energy","norm"])
 def xas_deconvolve(energy, norm=None, group=None, form='lorentzian',
                    esigma=1.0, eshift=0.0, smooth=True,
                    sgwindow=None, sgorder=3, _larch=None):
@@ -56,7 +57,7 @@ def xas_deconvolve(energy, norm=None, group=None, form='lorentzian',
                                          fcn_name='xas_deconvolve')
     eshift = eshift + 0.5 * esigma
 
-    en  = remove_dups(energy)
+    en  = remove_dups(energy, tiny=TINY_ENERGY)
     estep1 = int(0.1*en[0]) * 2.e-5
     en  = en - en[0]
     estep = max(estep1, 0.01*int(min(en[1:]-en[:-1])*100.0))
@@ -94,6 +95,7 @@ def xas_deconvolve(energy, norm=None, group=None, form='lorentzian',
     group.deconv = out
 
 
+@Make_CallArgs(["energy","norm"])
 def xas_convolve(energy, norm=None, group=None, form='lorentzian',
                    esigma=1.0, eshift=0.0, _larch=None):
     """
@@ -129,7 +131,7 @@ def xas_convolve(energy, norm=None, group=None, form='lorentzian',
                                          fcn_name='xas_convolve')
     eshift = eshift + 0.5 * esigma
 
-    en  = remove_dups(energy)
+    en  = remove_dups(energy, tiny=TINY_ENERGY)
     en  = en - en[0]
     estep = max(0.001, 0.001*int(min(en[1:]-en[:-1])*1000.0))
 

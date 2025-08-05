@@ -14,16 +14,8 @@ import time
 import signal
 from select import select
 from ctypes import c_void_p, c_int, cast, CFUNCTYPE, pythonapi
-
+from pyshortcuts import uname
 import wx
-from wxutils import is_wxPhoenix
-
-if is_wxPhoenix:
-    is_wxMain = wx.IsMainThread
-    wx_EvtLoop = wx.GUIEventLoop
-else:
-    is_wxMain = wx.Thread_IsMain
-    wx_EvtLoop = wx.EventLoop
 
 POLLTIME = 10 # milliseconds
 ON_INTERRUPT = None
@@ -54,10 +46,11 @@ sleep = time.sleep
 
 def onCtrlC(*args, **kws):
     global WXLARCH_SYM
-    try:
-        WXLARCH_SYM.set_symbol('_sys.wx.keyboard_interrupt', True)
-    except AttributeError:
-        pass
+    if WXLARCH_SYM is not None:
+        try:
+            WXLARCH_SYM.set_symbol('_sys.wx.keyboard_interrupt', True)
+        except AttributeError:
+            pass
     raise KeyboardInterrupt
     return 0
 
@@ -75,13 +68,11 @@ def stdin_ready():
     inp, out, err = select([sys.stdin],[],[],0)
     return bool(inp)
 
-if sys.platform == 'win32':
+if uname == 'win':
     from msvcrt import kbhit as stdin_ready
-    clock = time.clock
+    clock = time.monotonic
     def ignore_CtrlC():
         pass
-elif sys.platform == 'darwin':
-    from .allow_idle_macosx import allow_idle
 
 
 class EnteredModalDialogHook(wx.ModalDialogHook):
@@ -107,12 +98,14 @@ class EnteredModalDialogHook(wx.ModalDialogHook):
 class EventLoopRunner(object):
     def __init__(self, parent):
         self.parent = parent
+        self.timer = wx.Timer()
+        self.evtloop = wx.GUIEventLoop()
 
     def run(self, poll_time=None):
         if poll_time is None:
             poll_time = POLLTIME
         self.t0 = clock()
-        self.evtloop = wx_EvtLoop()
+        self.evtloop = wx.GUIEventLoop()
         self.timer = wx.Timer()
         self.parent.Bind(wx.EVT_TIMER, self.check_stdin)
         self.timer.Start(poll_time)
@@ -122,7 +115,7 @@ class EventLoopRunner(object):
         try:
             if (not IN_MODAL_DIALOG and (stdin_ready() or
                                         update_requested() or
-                                        (clock() - self.t0) > 5)):
+                                        (clock() - self.t0) > 15)):
                 self.timer.Stop()
                 self.evtloop.Exit()
                 del self.timer, self.evtloop
@@ -147,11 +140,11 @@ def inputhook_wx():
     try:
         app = wx.GetApp()
         if app is not None:
-            assert is_wxMain()
+            assert wx.IsMainThread()
 
             if not callable(signal.getsignal(signal.SIGINT)):
                 signal.signal(signal.SIGINT, signal.default_int_handler)
-            evtloop = wx_EvtLoop()
+            evtloop = wx.GUIEventLoop()
             ea = wx.EventLoopActivator(evtloop)
             t = clock()
             while not stdin_ready() and not update_requested():
@@ -179,6 +172,26 @@ def inputhook_wx():
             ON_INTERRUPT()
     return 0
 
+def ping(timeout=0.001):
+    "ping wx"
+    try:
+        t0 = clock()
+        app = wx.GetApp()
+        if app is not None:
+            assert wx.IsMainThread()
+            # Make a temporary event loop and process system events until
+            # there are no more waiting, then allow idle events (which
+            # will also deal with pending or posted wx events.)
+            evtloop = wx_EventLoop()
+            ea = wx.EventLoopActivator(evtloop)
+            t0 = clock()
+            while clock()-t0 < timeout:
+                evtloop.Dispatch()
+            app.ProcessIdle()
+            del ea
+    except:
+        pass
+
 def inputhook_darwin():
     """Run the wx event loop, polling for stdin.
 
@@ -196,21 +209,24 @@ def inputhook_darwin():
     try:
         app = wx.GetApp()
         if app is not None:
-            assert is_wxMain()
+            assert wx.IsMainThread()
             modal_hook = EnteredModalDialogHook()
             modal_hook.Register()
             eloop = EventLoopRunner(parent=app)
             ptime = POLLTIME
             if update_requested():
                 ptime /= 10
-            eloop.run(poll_time=ptime)
+            eloop.run(poll_time=int(ptime+1))
     except KeyboardInterrupt:
-        print(" See KeyboardInterrupt from darwin hook")
         if callable(ON_INTERRUPT):
             ON_INTERRUPT()
     return 0
 
-if sys.platform == 'darwin':
+
+def ping_darwin(timeout=0.001):
+    inputhook_darwin()
+
+if uname == 'darwin':
     # On OSX, evtloop.Pending() always returns True, regardless of there being
     # any events pending. As such we can't use implementations 1 or 3 of the
     # inputhook as those depend on a pending/dispatch loop.
@@ -225,24 +241,7 @@ py_inphook = c_void_p.in_dll(pythonapi, 'PyOS_InputHook')
 py_inphook.value = cast(cback, c_void_p).value
 
 # import for Darwin!
-allow_idle()
-
-def ping(timeout=0.001):
-    "ping wx"
-    try:
-        t0 = clock()
-        app = wx.GetApp()
-        if app is not None:
-            assert is_wxMain()
-            # Make a temporary event loop and process system events until
-            # there are no more waiting, then allow idle events (which
-            # will also deal with pending or posted wx events.)
-            evtloop = wx_EventLoop()
-            ea = wx.EventLoopActivator(evtloop)
-            t0 = clock()
-            while clock()-t0 < timeout:
-                evtloop.Dispatch()
-            app.ProcessIdle()
-            del ea
-    except:
-        pass
+if uname == 'darwin':
+    from .allow_idle_macosx import allow_idle
+#   allow_idle()
+#     print("no allow idle")

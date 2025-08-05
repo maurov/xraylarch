@@ -1,0 +1,30 @@
+#  note: contents of xafs_plots.lar has moved to :mod:`larch.wxlib.xafsplots`
+#  this is maintained for backward compatibility
+
+"""
+Plotting macros for XAFS data sets and fits
+
+ Function          Description of what is plotted
+ ---------------- -----------------------------------------------------
+  plot_mu()        mu(E) for XAFS data group in various forms
+  plot_bkg()       mu(E) and background mu0(E) for XAFS data group
+  plot_chik()      chi(k) for XAFS data group
+  plot_chir()      chi(R) for XAFS data group
+  plot_chifit()    chi(k) and chi(R) for fit to feffit dataset
+  plot_path_k()    chi(k) for a single path of a feffit dataset
+  plot_path_r()    chi(R) for a single path of a feffit dataset
+  plot_paths_k()   chi(k) for model and all paths of a feffit dataset
+  plot_paths_r()   chi(R) for model and all paths of a feffit dataset
+ ---------------- -----------------------------------------------------
+"""
+
+plotlabels = _xafs.plotlabels
+plot_mu = _xafs.plot_mu
+plot_bkg = _xafs.plot_bkg
+plot_chik = _xafs.plot_chik
+plot_chir = _xafs.plot_chir
+plot_chifit = _xafs.plot_chifit
+plot_path_k = _xafs.plot_path_k
+plot_path_r = _xafs.plot_path_r
+plot_paths_k = _xafs.plot_paths_k
+plot_paths_r = _xafs.plot_paths_r

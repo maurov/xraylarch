@@ -5,18 +5,41 @@
 import numpy as np
 from numpy import (pi, arange, zeros, ones, sin, cos,
                    exp, log, sqrt, where, interp, linspace)
-# from numpy.fft import fft, ifft
-from scipy.fftpack import fft, ifft
+
+# notes on FFT method choice: (April 2023)
+# benchmarking (and tossing out the first few runs)for complex128 arrays of
+# length 2048, as used here for XAFS, gives these kinds of run times:
+#
+#   fft interface :  mean       std   worst
+#   numpy         :  2.2509   0.0955  2.4858
+#   scipy         :  2.1156   0.0592  2.2758
+#   scipy fftpack :  1.9757   0.0233  2.0246
+#   mkl numpy     :  1.1822   0.0188  1.2279
+#   mkl scipy     :  1.4442   0.0688  1.6263
+#   fftw numpy    :  5.4955   0.1958  6.0779
+#   fftw scipy    :  5.5210   0.1620  5.9154
+#   fftw fftpack  :  5.4329   0.0807  5.5917
+#
+# this shows a noticeable performance win for MKL numpy interface,
+# with a modest win for scipy.fftpack over numpy or scipy if MKL
+# is not available.  These results were consistent for Linux,
+# Windows, and MacOSX.
+#
+
+try:
+    from mkl_fft.interfaces.numpy_fft import fft, ifft
+except (ImportError, ModuleNotFoundError):
+    from scipy.fftpack import fft, ifft
+
 from scipy.special import i0 as bessel_i0
 
-from larch import (Group, Make_CallArgs, parse_group_args)
+from larch import Group
+from larch.larchlib import Make_CallArgs, parse_group_args
 
 from larch.math import complex_phase
-from .xafsutils import set_xafsGroup
-
+from .xafsutils import set_xafsGroup, FT_WINDOWS_SHORT
 
 MODNAME = '_xafs'
-VALID_WINDOWS = ['han', 'fha', 'gau', 'kai', 'par', 'wel', 'sin', 'bes']
 sqrtpi = sqrt(pi)
 
 def ftwindow(x, xmin=None, xmax=None, dx=1, dx2=None,
@@ -49,9 +72,9 @@ def ftwindow(x, xmin=None, xmax=None, dx=1, dx2=None,
 
     """
     if window is None:
-        window = VALID_WINDOWS[0]
+        window = FT_WINDOWS_SHORT[0]
     nam = window.strip().lower()[:3]
-    if nam not in VALID_WINDOWS:
+    if nam not in FT_WINDOWS_SHORT:
         raise RuntimeError("invalid window name %s" % window)
 
     dx1 = dx
@@ -200,9 +223,9 @@ def xftr(r, chir=None, group=None, rmin=0, rmax=20, with_phase=False,
 
 
 @Make_CallArgs(["k", "chi"])
-def xftf(k, chi=None, group=None, kmin=0, kmax=20, kweight=0,
+def xftf(k, chi=None, group=None, kmin=0, kmax=20, kweight=None,
          dk=1, dk2=None, with_phase=False, window='kaiser', rmax_out=10,
-         nfft=2048, kstep=0.05, _larch=None, **kws):
+         nfft=2048, kstep=None, _larch=None, **kws):
     """
     forward XAFS Fourier transform, from chi(k) to chi(R), using
     common XAFS conventions.
@@ -213,14 +236,14 @@ def xftf(k, chi=None, group=None, kmin=0, kmax=20, kweight=0,
       chi:      1-d array of chi
       group:    output Group
       rmax_out: highest R for output data (10 Ang)
-      kweight:  exponent for weighting spectra by k**kweight
+      kweight:  exponent for weighting spectra by k**kweight [2]
       kmin:     starting k for FT Window
       kmax:     ending k for FT Window
       dk:       tapering parameter for FT Window
       dk2:      second tapering parameter for FT Window
       window:   name of window type
       nfft:     value to use for N_fft (2048).
-      kstep:    value to use for delta_k (0.05 Ang^-1).
+      kstep:    value to use for delta_k (k[1]-k[0] Ang^-1).
       with_phase: output the phase as well as magnitude, real, imag  [False]
 
     Returns:
@@ -242,12 +265,17 @@ def xftf(k, chi=None, group=None, kmin=0, kmax=20, kweight=0,
     Supports First Argument Group convention (with group member names 'k' and 'chi')
     """
     # allow kweight keyword == kw
-    if 'kw' in kws:
-        kweight = kws['kw']
-
+    if kweight is None:
+        if 'kw' in kws:
+            kweight = kws['kw']
+        else:
+            kweight = 2
     k, chi, group = parse_group_args(k, members=('k', 'chi'),
                                      defaults=(chi,), group=group,
                                      fcn_name='xftf')
+
+    if kstep is None:
+        kstep = k[1] - k[0]
 
     cchi, win  = xftf_prep(k, chi, kmin=kmin, kmax=kmax, kweight=kweight,
                                dk=dk, dk2=dk2, nfft=nfft, kstep=kstep,
@@ -282,6 +310,7 @@ def xftf_prep(k, chi, kmin=0, kmax=20, kweight=2, dk=1, dk2=None,
     and used in xftf_fast.
     """
     if dk2 is None: dk2 = dk
+    kweight = int(kweight)
     npts = int(1.01 + max(k)/kstep)
     k_max = max(max(k), kmax+dk2)
     k_   = kstep * np.arange(int(1.01+k_max/kstep), dtype='float64')

@@ -9,22 +9,14 @@
 
 import os
 import sys
-from copy import copy, deepcopy
 from glob import glob
-
-def _copy(obj):
-    """copy an object"""
-    return copy(obj)
-
-def _deepcopy(obj):
-    """deep copy an object"""
-    return deepcopy(obj)
+from pyshortcuts import get_cwd, uname
 
 def _parent(name, _larch=None):
     "return parent group name of an object"
     return _larch.symtable._lookup(name)
 
-def _ls(directory='.'):
+def ls(directory='.'):
     """return a list of files in the current directory,
     optionally using '*' to match file names
 
@@ -52,37 +44,39 @@ def _ls(directory='.'):
         ret = os.listdir(directory)
     else:
         ret = glob(directory)
-    if sys.platform == 'win32':
+    if uname == 'win':
         for i in range(len(ret)):
             ret[i] = ret[i].replace('\\','/')
     return ret
 
-def _cwd():
+def cwd():
     "return current working directory"
-    ret = os.getcwd()
-    if sys.platform == 'win32':
+    ret = get_cwd()
+    if uname == 'win':
         ret = ret.replace('\\','/')
     return ret
 
-def _cd(name):
+def cd(name):
     """change directory to specified directory"""
-    name = name.strip()
-    if name:
-        os.chdir(name)
+    os.chdir(name.strip())
+    return cwd()
 
-    ret = os.getcwd()
-    if sys.platform == 'win32':
-        ret = ret.replace('\\','/')
-    return ret
 
-def _mkdir(name, mode=0o777):
-    """create directory (and any intermediate subdirectories
+def mkdir(name, mode=0o775):
+    """create directory (and any intermediate subdirectories)
 
     Options:
     --------
-      mode   permission mask to use for creating directory (default=0777)
+      mode   permission mask to use for creating directory (default=0775)
     """
-    return os.makedirs(name, mode=mode)
+    if os.path.exists(name):
+        if os.path.isdir(name):
+            os.chmod(name, mode)
+        else:
+            raise FileExistsError(f"'{name}' is a file, cannot make folder with that name")
+    else:
+        os.makedirs(name, mode=mode)
+
 
 def show_more(text, filename=None, writer=None,
               pagelength=30, prefix='', _larch=None):

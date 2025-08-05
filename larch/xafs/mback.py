@@ -10,13 +10,12 @@ from xraydb import (xray_edge, xray_line, xray_lines,
                     atomic_number, atomic_symbol)
 from lmfit import Parameter, Parameters, minimize
 
-from larch import Group, isgroup, parse_group_args
-
+from larch import Group, isgroup
+from larch.larchlib import Make_CallArgs, parse_group_args
 from larch.math import index_of, index_nearest, remove_dups, remove_nans2
 
-from .xafsutils import set_xafsGroup
-from .pre_edge import find_e0, preedge
-
+from .xafsutils import set_xafsGroup, TINY_ENERGY
+from .pre_edge import find_e0, preedge, pre_edge
 
 MAXORDER = 6
 
@@ -65,15 +64,15 @@ def mback(energy, mu=None, group=None, z=None, edge='K', e0=None, pre1=None, pre
       energy:     array of x-ray energies, in eV.
       mu:         array of mu(E).
       group:      output group.
-	  z:          atomic number of the absorber.
-	  edge:       x-ray absorption edge (default 'K')
+          z:          atomic number of the absorber.
+          edge:       x-ray absorption edge (default 'K')
       e0:         edge energy, in eV.  If None, it will be determined here.
       pre1:       low E range (relative to e0) for pre-edge region.
       pre2:       high E range (relative to e0) for pre-edge region.
       norm1:      low E range (relative to e0) for post-edge region.
       norm2:      high E range (relative to e0) for post-edge region.
       order:      order of the legendre polynomial for normalization.
-	              (default=3, min=0, max=5).
+                      (default=3, min=0, max=5).
       leexiang:   boolean (default False)  to use the Lee & Xiang extension.
       tables:     tabulated scattering factors: 'chantler' [deprecated]
       fit_erfc:   boolean (default False) to fit parameters of error function.
@@ -88,8 +87,8 @@ def mback(energy, mu=None, group=None, z=None, edge='K', e0=None, pre1=None, pre
       group.f2:            tabulated f2(E).
       group.f1:            tabulated f1(E) (if 'return_f1' is True).
       group.fpp:           mback atched spectrum.
-	  group.edge_step:     edge step of spectrum.
-	  group.norm:          normalized spectrum.
+          group.edge_step:     edge step of spectrum.
+          group.norm:          normalized spectrum.
       group.mback_params:  group of parameters for the minimization.
 
     Notes:
@@ -114,11 +113,12 @@ def mback(energy, mu=None, group=None, z=None, edge='K', e0=None, pre1=None, pre
     if _larch is not None:
         group = set_xafsGroup(group, _larch=_larch)
 
-    energy = remove_dups(energy)
+    energy = remove_dups(energy, tiny=TINY_ENERGY)
+    if energy.size <= 1:
+        raise ValueError("energy array must have at least 2 points")
     if e0 is None or e0 < energy[1] or e0 > energy[-2]:
         e0 = find_e0(energy, mu, group=group)
 
-    print(e0)
     ie0 = index_nearest(energy, e0)
     e0 = energy[ie0]
 
@@ -146,7 +146,7 @@ def mback(energy, mu=None, group=None, z=None, edge='K', e0=None, pre1=None, pre
         p2 = min(len(energy), p1 + 2)
 
     ## theta is a boolean array indicating the
-	## energy values considered for the fit.
+        ## energy values considered for the fit.
     ## theta=1 for included values, theta=0 for excluded values.
     theta            = np.zeros_like(energy, dtype='int')
     theta[p1:(p2+1)] = 1
@@ -196,7 +196,7 @@ def mback(energy, mu=None, group=None, z=None, edge='K', e0=None, pre1=None, pre
     group.fpp = opars['s']*mu - norm_function
     # calculate edge step and normalization from f2 + norm_function
     pre_f2 = preedge(energy, group.f2+norm_function, e0=e0, pre1=pre1,
-	         pre2=pre2, norm1=norm1, norm2=norm2, nnorm=2, nvict=0)
+                 pre2=pre2, norm1=norm1, norm2=norm2, nnorm=2, nvict=0)
     group.edge_step = pre_f2['edge_step'] / opars['s']
     group.norm = (opars['s']*mu -  pre_f2['pre_edge']) / pre_f2['edge_step']
     group.mback_details = Group(params=opars, pre_f2=pre_f2,
@@ -214,7 +214,7 @@ def f2norm(params, en=1, mu=1, f2=1, weights=1):
     model = (p['offset'] + p['slope']*en + f2) * p['scale']
     return weights * (model - mu)
 
-
+@Make_CallArgs(["energy","mu"])
 def mback_norm(energy, mu=None, group=None, z=None, edge='K', e0=None,
                pre1=None, pre2=None, norm1=None, norm2=None, nnorm=None, nvict=1,
                _larch=None):
@@ -256,6 +256,11 @@ def mback_norm(energy, mu=None, group=None, z=None, edge='K', e0=None,
 
     if _larch is not None:
         group = set_xafsGroup(group, _larch=_larch)
+
+    if getattr(group, 'pre_edge_details', None) is None:  # pre_edge never run
+        pre_edge(group, pre1=pre1, pre2=pre2, nvict=nvict,
+                norm1=norm1, norm2=norm2, e0=e0, nnorm=nnorm)
+
     group.norm_poly = group.norm*1.0
 
     if z is not None:              # need to run find_e0:
@@ -273,9 +278,18 @@ def mback_norm(energy, mu=None, group=None, z=None, edge='K', e0=None,
     if atsym is None and z is not None:
         atsym = atomic_symbol(z)
 
-    if getattr(group, 'pre_edge_details', None) is None:  # pre_edge never run
-        preedge(energy, mu, pre1=pre1, pre2=pre2, nvict=nvict,
-                norm1=norm1, norm2=norm2, e0=e0, nnorm=nnorm)
+    if pre1 is None:
+        pre1 = group.pre_edge_details.pre1
+    if pre2 is None:
+        pre2 = group.pre_edge_details.pre2
+    if nvict is None:
+        nvict = group.pre_edge_details.nvict
+    if norm1 is None:
+        norm1 = group.pre_edge_details.norm1
+    if norm2 is None:
+        norm2 = group.pre_edge_details.norm2
+    if nnorm is None:
+        nnorm = group.pre_edge_details.nnorm
 
     mu_pre = mu - group.pre_edge
     f2 = f2_chantler(z, energy)
@@ -284,9 +298,8 @@ def mback_norm(energy, mu=None, group=None, z=None, edge='K', e0=None,
 
     if norm2 is None:
         norm2 = max(energy) - e0
-
     if norm2 < 0:
-        norm2 = max(energy) - e0  - norm2
+        norm2 = (max(energy) - e0)  - norm2
 
     # avoid l2 and higher edges
     if edge.lower().startswith('l'):
@@ -294,12 +307,13 @@ def mback_norm(energy, mu=None, group=None, z=None, edge='K', e0=None,
             e_l2 = xray_edge(z, 'L2').energy
             norm2 = min(norm2,  e_l2-e0)
         elif edge.lower() == 'l2':
-            e_l2 = xray_edge(z, 'L1').energy
+            e_l1 = xray_edge(z, 'L1').energy
             norm2 = min(norm2,  e_l1-e0)
 
     ipre2 = index_of(energy, e0+pre2)
     inor1 = index_of(energy, e0+norm1)
     inor2 = index_of(energy, e0+norm2) + 1
+
 
 
     weights[ipre2:] = 0.0
@@ -325,10 +339,11 @@ def mback_norm(energy, mu=None, group=None, z=None, edge='K', e0=None,
 
     step_new = pre_f2['edge_step']
 
-    group.edge_step_poly  = group.edge_step
+    group.edge_step_poly = group.edge_step
     group.edge_step_mback = step_new
     group.norm_mback = mu_pre / step_new
-
+    group.edge_step = step_new
+    group.norm = group.norm_mback
 
     group.mback_params = Group(e0=e0, pre1=pre1, pre2=pre2, norm1=norm1,
                                norm2=norm2, nnorm=nnorm, fit_params=p,
@@ -336,7 +351,4 @@ def mback_norm(energy, mu=None, group=None, z=None, edge='K', e0=None,
                                pre_f2=pre_f2, atsym=atsym, edge=edge)
 
     if (abs(step_new - group.edge_step)/(1.e-13+group.edge_step)) > 0.75:
-        print("Warning: mback edge step failed....")
-    else:
-        group.edge_step = step_new
-        group.norm       = group.norm_mback
+        print(f"Warning: suspicious mback results: step was {group.edge_edge:.4f}, now {step_new:.4f}")

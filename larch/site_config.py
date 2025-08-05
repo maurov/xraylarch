@@ -3,143 +3,117 @@
 site configuration for larch:
 
    init_files:  list of larch files run (in order) on startup
-   module_path: list of directories to search for larch code
    history_file:
 """
-from __future__ import print_function
-
 import sys
 import os
-from os.path import exists, abspath, join
-from .utils import uname, get_homedir, nativepath
-from .version import __version__ as larch_version
+import logging
+from pathlib import Path
 
+from subprocess import check_call, CalledProcessError, TimeoutExpired
+
+from packaging.version import parse as version_parse
+
+from pyshortcuts import uname, get_homedir
+from .version import __version__, __release_version__
+
+larch_version = __version__
+larch_release_version = __release_version__
+
+logging.basicConfig(format='%(levelname)s [%(asctime)s]: %(message)s',
+                    datefmt='%Y-%m-%d %H:%M:%S', level=logging.WARNING)
+
+# lists of recommended packages that are not installed by default
+# but may be installed if several of the larch apps are run.
 
 def pjoin(*args):
-    return nativepath(join(*args))
+    "simple join"
+    return Path(*args).absolute().as_posix()
 
-##
-# set system-wide and local larch folders
-#   usr_larchdir = get_homedir() + '.larch' (#unix)
-#                = get_homedir() + 'larch'  (#win)
-##
+
+#                 = get_homedir() + 'larch'  (#win)
 home_dir = get_homedir()
 
-here, i_am = os.path.split(__file__)
-icondir = os.path.join(here, 'icons')
+icondir = Path(Path(__file__).parent, 'icons').absolute()
 
-usr_larchdir = pjoin(home_dir, '.larch')
-if uname == 'win':
-    usr_larchdir = pjoin(home_dir, 'larch')
+user_larchdir = pjoin(home_dir, '.larch')
 
 if 'LARCHDIR' in os.environ:
-    usr_larchdir = nativepath(os.environ['LARCHDIR'])
+    user_larchdir = Path(os.environ['LARCHDIR']).absolute().as_posix()
 
 # on Linux, check for HOME/.local/share,
 # make with mode=711 if needed
 if uname in ('linux', 'darwin') and os.getuid() > 0:
-    lshare = os.path.join(home_dir, '.local', 'share')
-    if not os.path.exists(lshare):
-        os.makedirs(lshare, mode=457) # for octal 711
+    lshare = Path(home_dir, '.local', 'share').absolute()
+    lshare.mkdir(mode=457, parents=True, exist_ok=True) # for octal 711
 
-
-# frozen executables, as from cx_freeze, will have
-# these paths to be altered...
-if hasattr(sys, 'frozen'):
-    if uname.startswith('win'):
-        try:
-            tdir, exe = os.path.split(sys.executable)
-            toplevel, bindir = os.path.split(tdir)
-            larchdir = os.path.abspath(toplevel)
-        except:
-            pass
-    elif uname.startswith('darwin'):
-        tdir, exe = os.path.split(sys.executable)
-        toplevel, bindir = os.path.split(tdir)
-        larchdir = pjoin(toplevel, 'Resources', 'larch')
-
-modules_path = []
-plugins_path = []
-_path = [usr_larchdir]
-
-if 'LARCHPATH' in os.environ:
-    _path.extend([nativepath(s) for s in os.environ['LARCHPATH'].split(':')])
-
-for pth in _path:
-    mdir = pjoin(pth, 'modules')
-    if exists(mdir) and mdir not in modules_path:
-        modules_path.append(mdir)
-
-    pdir = pjoin(pth, 'plugins')
-    if exists(pdir) and pdir not in plugins_path:
-        plugins_path.append(pdir)
 
 # initialization larch files to be run on startup
-init_files = [pjoin(usr_larchdir, 'init.lar')]
+init_files = [pjoin(user_larchdir, 'init.lar')]
 
 if 'LARCHSTARTUP' in os.environ:
-    startup = os.environ['LARCHSTARTUP']
-    if exists(startup):
-        init_files = [nativepath(startup)]
+    startup = Path(os.environ['LARCHSTARTUP'])
+    if startup.exists():
+        init_files = [startup.as_posix()]
 
 # history file:
-history_file = pjoin(usr_larchdir, 'history.lar')
+history_file = pjoin(user_larchdir, 'history.lar')
 
 def make_user_larchdirs():
     """create user's larch directories"""
     files = {'init.lar':             'put custom startup larch commands:',
-             'history.lar':          'history of larch commands:',
-             'history_larchgui.lar': 'history of larch_gui commands:',
+             'history.lar':          'history of commands for larch CLI',
+             'history_larchgui.lar': 'history of commands for larch GUI',
              }
-    subdirs = {'matplotlib': 'matplotlib may put files here',
-               'dlls':       'put dlls here',
-               'modules':    'put custom larch or python modules here',
-               'plugins':    'put custom larch plugins here'}
+    subdirs = {'matplotlib': 'matplotlib may put cache files here',
+               'feff':       'Feff files and subfolders here',
+               'fdmnes':     'FDMNES files and subfolders here',
+               }
 
     def make_dir(dname):
-        if not exists(dname):
+        "create directory"
+        dname = Path(dname).absolute()
+        if not dname.exists():
             try:
-                os.mkdir(dname)
+                dname.mkdir(mode=493, parents=True)
             except PermissionError:
-                print("no permission to create directory ", dname)
+                log_warning(f'no permission to create directory {dname.as_posix()}')
             except (OSError, TypeError):
-                print(sys.exc_info()[1])
+                logging.error(sys.exc_info()[1])
 
     def write_file(fname, text):
-        if not exists(fname):
+        "write wrapper"
+        if not Path(fname).exists():
             try:
-                f = open(fname, 'w')
-                f.write('# %s\n' % text)
-                f.close()
-            except:
-                print(sys.exc_info()[1])
+                with open(fname, 'w', encoding=sys.getdefaultencoding()) as fileh:
+                    fileh.write(f'# {text}\n')
+            except IOError:
+                logging.error(sys.exc_info()[1])
 
-    make_dir(usr_larchdir)
+    make_dir(user_larchdir)
     for fname, text in files.items():
-        write_file(pjoin(usr_larchdir, fname), text)
+        write_file(pjoin(user_larchdir, fname), text)
 
     for sdir, text in subdirs.items():
-        sdir = pjoin(usr_larchdir, sdir)
+        sdir = pjoin(user_larchdir, sdir)
         make_dir(sdir)
         write_file(pjoin(sdir, 'README'), text)
 
 
+def site_config():
+    "retutn string of site config"
+    return f"""#== Larch Configuration:
+  Release version:     {__release_version__}
+  Development version: {__version__}
+  Python executable:   {sys.executable}
+  User larch dir:      {user_larchdir}
+  User history_file:   {history_file}
+#========================
+"""
+
 def show_site_config():
-    print( """===  Larch Configuration
-  larch version:        %s
-  sys executable:       %s
-  sys is frozen:        %s
-  users larch dir:      %s
-  users history_file:   %s
-  users startup files:  %s
-  modules search path:  %s
-  plugins search path:  %s
-========================
-""" % (larch_version, sys.executable,
-       repr(getattr(sys, 'frozen', False)),
-       usr_larchdir,
-       history_file, init_files,
-       modules_path, plugins_path))
+    "print stie_config"
+    print(site_config())
 
 def system_settings():
     """set system-specific Environmental Variables, and make sure

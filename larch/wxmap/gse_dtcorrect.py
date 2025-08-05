@@ -22,14 +22,16 @@ except ImportError:
     pass
 
 import larch
-from ..larchlib import read_workdir, save_workdir
-
-from ..io  import (gsescan_deadtime_correct, gsexdi_deadtime_correct,
+from larch.larchlib import read_workdir, save_workdir
+from larch.utils import get_cwd
+from larch.io  import (gsescan_deadtime_correct, gsexdi_deadtime_correct,
                    is_GSEXDI, AthenaProject, new_filename, increment_filename)
 
 from wxutils import (SimpleText, FloatCtrl, pack, Button, Popup,
                      Choice,  Check, MenuItem, GUIColors,
                      CEN, LEFT, FRAMESTYLE, Font)
+
+from larch.wxlib import LarchWxApp
 
 CEN |=  wx.ALL
 FILE_WILDCARDS = "Scan Data Files(*.0*,*.1*,*.dat,*.xdi)|*.0*;*.1*;*.dat;*.xdi|All files (*)|*"
@@ -76,12 +78,13 @@ class DTCorrectFrame(wx.Frame):
     def onBrowse(self, event=None):
         dlg = wx.FileDialog(parent=self,
                         message='Select Files',
-                        defaultDir=os.getcwd(),
+                        defaultDir=get_cwd(),
                         wildcard =FILE_WILDCARDS,
                         style=wx.FD_OPEN|wx.FD_MULTIPLE|wx.FD_CHANGE_DIR)
 
         if dlg.ShowModal() == wx.ID_OK:
-            path = dlg.GetPath()
+            paths = dlg.GetPaths()
+            path = paths[0]
             mdir, p = os.path.split(path)
             os.chdir(mdir)
             roiname = self.wid_roi.GetValue().strip()
@@ -108,9 +111,8 @@ class DTCorrectFrame(wx.Frame):
                 corr_fcn = gsescan_deadtime_correct
                 if is_GSEXDI(fname):
                     corr_fcn = gsexdi_deadtime_correct
-                self.write_message("Correcting %s" % (fname))
-                out = corr_fcn(fname, roiname, subdir=dirname,
-                               bad=bad_channels, _larch=self.larch)
+                print("Correcting %s" % (fname))
+                out = corr_fcn(fname, roiname, subdir=dirname, bad=bad_channels)
                 if out is not None:
                     out.mu = out.mufluor
                     out.filename = fname
@@ -123,11 +125,11 @@ class DTCorrectFrame(wx.Frame):
             _, aname = os.path.split(athena_name)
             self.wid_ath.SetValue(increment_filename(aname))
 
-            aprj = AthenaProject(filename=athena_name, _larch=self.larch)
+            aprj = AthenaProject(filename=athena_name)
             for grp, label in groups:
                 aprj.add_group(grp, signal='mu')
             aprj.save(use_gzip=True)
-            self.write_message("Corrected %i files, wrote %s" % (len(groups), aname))
+            print("Corrected %i files, wrote %s" % (len(groups), aname))
 
     def createMainPanel(self):
         panel = wx.Panel(self)
@@ -195,21 +197,14 @@ class DTCorrectFrame(wx.Frame):
         self.Destroy()
 
 
-class DTViewer(wx.App, wx.lib.mixins.inspection.InspectionMixin):
+class DTViewer(LarchWxApp):
     def __init__(self, _larch=None, **kws):
-        self._larch = _larch
-        wx.App.__init__(self, **kws)
-
-    def run(self):
-        self.MainLoop()
+        LarchWxApp.__init__(self, _larch=_larch, **kws)
 
     def createApp(self):
         frame = DTCorrectFrame(_larch=self._larch)
         frame.Show()
         self.SetTopWindow(frame)
-
-    def OnInit(self):
-        self.createApp()
         return True
 
 def dtcorrect(wxparent=None, _larch=None,  **kws):

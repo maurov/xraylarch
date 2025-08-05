@@ -10,12 +10,6 @@ import socket
 
 from functools import partial
 import wx
-try:
-    from wx._core import PyDeadObjectError
-except:
-    PyDeadObjectError = Exception
-
-is_wxPhoenix = 'phoenix' in wx.PlatformInfo
 
 import numpy as np
 from matplotlib.figure import Figure
@@ -38,7 +32,7 @@ class MapImageFrame(ImageFrame):
     MatPlotlib Image Display on a wx.Frame, using ImagePanel
     """
 
-    def __init__(self, parent=None, size=(650, 650), mode='intensity',
+    def __init__(self, parent=None, size=(900, 750), mode='intensity',
                  lasso_callback=None, move_callback=None, save_callback=None,
                  show_xsections=False, cursor_labels=None,
                  with_savepos=True,output_title='Image', **kws):
@@ -56,9 +50,8 @@ class MapImageFrame(ImageFrame):
 
         w0, h0 = self.GetSize()
         w1, h1 = self.GetBestSize()
-        self.SetSize((max(w0, w1)+5, max(h0, h1)+5))
+        self.SetSize((max(w0, w1)+25, max(h0, h1)+50))
         self.SetMinSize((500, 500))
-
         self.prof_plotter = None
         self.zoom_ini =  None
         self.lastpoint = [None, None]
@@ -75,6 +68,8 @@ class MapImageFrame(ImageFrame):
         self.title = ''
         if 'title' in kws:
             self.title = kws['title']
+        if 'contrast_level' not in kws:
+            kws['contrast_level'] = 0.5
         ImageFrame.display(self, map, **kws)
         # self.set_contrast_levels()
 
@@ -187,16 +182,12 @@ class with_profile_mode:
         zdc.SetBrush(wx.TRANSPARENT_BRUSH)
         zdc.SetPen(wx.Pen('White', 2, wx.SOLID))
         zdc.ResetBoundingBox()
-        if not is_wxPhoenix:
-            zdc.BeginDrawing()
 
         # erase previous box
         if self.rbbox is not None:
             zdc.DrawLine(*self.rbbox)
         self.rbbox = (xmin, ymin, xmax, ymax)
         zdc.DrawLine(*self.rbbox)
-        if not is_wxPhoenix:
-            zdc.EndDrawing()
 
     def prof_leftdown(self, event=None):
         self.report_leftdown(event=event)
@@ -212,11 +203,7 @@ class with_profile_mode:
             zdc.SetBrush(wx.TRANSPARENT_BRUSH)
             zdc.SetPen(wx.Pen('White', 2, wx.SOLID))
             zdc.ResetBoundingBox()
-            if not is_wxPhoenix:
-                zdc.BeginDrawing()
             zdc.DrawLine(*self.rbbox)
-            if not is_wxPhoenix:
-                zdc.EndDrawing()
             self.rbbox = None
 
         if self.zoom_ini is None or self.lastpoint[0] is None:
@@ -259,7 +246,7 @@ class with_profile_mode:
                 self.prof_plotter.Raise()
                 self.prof_plotter.clear()
 
-            except (AttributeError, PyDeadObjectError):
+            except (AttributeError, Exception):
                 self.prof_plotter = None
 
         if self.prof_plotter is None:

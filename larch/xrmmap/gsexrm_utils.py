@@ -3,10 +3,10 @@ import numpy as np
 import time
 
 import larch
+from pyshortcuts import fix_varname
 
 from larch.io import (read_xsp3_hdf5, read_xrf_netcdf,
                       read_xrd_netcdf, read_xrd_hdf5)
-from larch.utils.strutils import fix_varname
 from .asciifiles import (readASCII, readMasterFile, readROIFile,
                          readEnvironFile, read1DXRDFile, parseEnviron)
 
@@ -80,23 +80,23 @@ class GSEXRM_MCADetector(object):
         self.shape =  self.xrmmap['%s/livetime' % detname].shape
 
         # energy
-        self.energy = self.xrmmap['%s/energy' % detname].value
+        self.energy = self.xrmmap['%s/energy' % detname][()]
 
         # set up rois
-        rnames = self.xrmmap['%s/roi_names' % detname].value
-        raddrs = self.xrmmap['%s/roi_addrs' % detname].value
-        rlims  = self.xrmmap['%s/roi_limits' % detname].value
+        rnames = self.xrmmap['%s/roi_names' % detname][()]
+        raddrs = self.xrmmap['%s/roi_addrs' % detname][()]
+        rlims  = self.xrmmap['%s/roi_limits' % detname][()]
         for name, addr, lims in zip(rnames, raddrs, rlims):
             self.rois.append(ROI(name=name, address=addr,
                                  left=lims[0], right=lims[1]))
 
     def __getval(self, param):
         if self.det is None:
-            out = self.xrmmap['%s1/%s' % (self.prefix, param)].value
+            out = self.xrmmap['%s1/%s' % (self.prefix, param)][()]
             for i in range(2, self.__ndet):
-                out += self.xrmmap['%s%i/%s' % (self.prefix, i, param)].value
+                out += self.xrmmap['%s%i/%s' % (self.prefix, i, param)][()]
             return out
-        return self.det[param].value
+        return self.det[param][()]
 
     @property
     def counts(self):
@@ -138,7 +138,7 @@ class GSEXRM_Area(object):
         if isinstance(index, int):
             index = 'area_%3.3i' % index
         self._area = self.xrmmap['areas/%s' % index]
-        self.npts = self._area.value.sum()
+        self.npts = self._area[()].sum()
 
         sy, sx = [slice(min(_a), max(_a)+1) for _a in np.where(self._area)]
         self.yslice, self.xslice = sy, sx
@@ -284,15 +284,15 @@ class GSEXRM_MapRow:
 
             except (IOError, IndexError):
                 time.sleep(0.025)
-
-        if atime < 0:
+                
+        if atime < 0 or xrf_dat is None:
             print( 'Failed to read data.')
             return
         if dtime is not None:
             dtime.add('maprow: read XRM files')
 
         ## SPECIFIC TO XRF data
-        if has_xrf:
+        if has_xrf and xrf_dat is not None:
             self.counts    = xrf_dat.counts[offslice]
             self.inpcounts = xrf_dat.inputCounts[offslice]
             self.outcounts = xrf_dat.outputCounts[offslice]
@@ -312,8 +312,8 @@ class GSEXRM_MapRow:
             dt_denom = self.outcounts*self.livetime
             dt_denom[np.where(dt_denom < 1)] = 1.0
             self.dtfactor  = self.inpcounts*self.realtime/dt_denom
-            self.dtfactor[np.where(self.dtfactor < 0.5)] = 0.5
             self.dtfactor[np.where(np.isnan(self.dtfactor))] = 1.0
+            self.dtfactor[np.where(self.dtfactor < 0.95)] = 0.95
             if force_no_dtc: # in case deadtime info is unreliable (some v old data)
                 self.outcounts = self.inpcounts*1.0
                 self.livetime  = self.realtime*1.0
@@ -472,5 +472,15 @@ class GSEXRM_MapRow:
             self.realtime = self.realtime.swapaxes(0, 1)
             self.counts   = self.counts.swapaxes(0, 1)
             iy, ix = self.dtfactor.shape
-            self.total = (self.counts * self.dtfactor.reshape(iy, ix, 1)).sum(axis=0)
+
+            self.total = self.counts.sum(axis=0)
+            # dtfactor for total
+            total_dtc = (self.counts * self.dtfactor.reshape(iy, ix, 1)).sum(axis=0).sum(axis=1)
+            dt_denom = self.total.sum(axis=1)
+            dt_denom[np.where(dt_denom < 1)] = 1.0
+            dtfact  = total_dtc / dt_denom
+            dtfact[np.where(np.isnan(dtfact))] = 1.0
+            dtfact[np.where(dtfact < 0.95)] = 0.95
+            dtfact[np.where(dtfact > 50.0)] = 50.0
+            self.total_dtfactor = dtfact
         self.read_ok = True

@@ -2,41 +2,24 @@
 """
   XAFS pre-edge subtraction, normalization algorithms
 """
-
 import numpy as np
-from scipy import polyfit
-from scipy.signal import find_peaks_cwt
-from scipy.integrate import simps
 
-from lmfit import Parameters, Minimizer
-from lmfit.models import (LorentzianModel, GaussianModel,
-                          VoigtModel, LinearModel)
-
-try:
-    import peakutils
-    HAS_PEAKUTILS = True
-except ImportError:
-    HAS_PEAKUTILS = False
-
-
-from xraydb import guess_edge, xray_edge, core_width
-
-from larch import Group, Make_CallArgs, isgroup, parse_group_args
-# now we can reliably import other std and xafs modules...
-
-from larch.math import (index_of, index_nearest,
-                        remove_dups, remove_nans2)
-from .xafsutils import set_xafsGroup
+from lmfit import Parameters, Minimizer, report_fit
+from xraydb import guess_edge
+from larch import Group
+from larch.larchlib import Make_CallArgs, parse_group_args
+from larch.math import (index_of, index_nearest, interp, smooth,
+                        polyfit, remove_dups, remove_nans, remove_nans2)
+from .xafsutils import set_xafsGroup, TINY_ENERGY
 
 MODNAME = '_xafs'
 MAX_NNORM = 5
 
+@Make_CallArgs(["energy","mu"])
 def find_e0(energy, mu=None, group=None, _larch=None):
-    """calculate :math:`E_0`, the energy threshold of absorption, or
-    'edge energy', given :math:`\mu(E)`.
+    """calculate E0, the energy threshold of absorption, or 'edge energy', given mu(E).
 
-    :math:`E_0` is found as the point with maximum derivative with
-    some checks to avoid spurious glitches.
+    E0 is found as the point with maximum derivative with some checks to avoid spurious glitches.
 
     Arguments:
         energy (ndarray or group): array of x-ray energies, in eV, or group
@@ -54,43 +37,124 @@ def find_e0(energy, mu=None, group=None, _larch=None):
     energy, mu, group = parse_group_args(energy, members=('energy', 'mu'),
                                          defaults=(mu,), group=group,
                                          fcn_name='find_e0')
-    e0 = _finde0(energy, mu)
+    energy, mu = remove_nans2(energy, mu)
+    # first find e0 without smoothing, then refine with smoothing
+    e1, ie0, estep1 = _finde0(energy, mu, estep=None, use_smooth=False)
+    istart = max(3, ie0-75)
+    istop  = min(ie0+75, len(energy)-3)
+    # sanity check: e0 should not be in first 5% of energy point: avoids common glitches
+    if ie0 < 0.05*len(energy):
+        e1 = energy.mean()
+        istart = max(3, ie0-20)
+        istop = len(energy)-3
+
+    # for the smoothing energy, we use and energy step that is an average of
+    # the observed minimimum energy step (which could be ridiculously low)
+    # and a scaled value of the initial e0 (0.2 eV and 5000 eV, 0.4 eV at 10000 eV)
+    # print("Find E0 step 1 ", e1, ie0, len(energy), estep1, istart, istop)
+    estep = 0.5*(max(0.01, min(1.0, estep1)) + max(0.01, min(1.0, e1/25000.)))
+    e0, ix, ex = _finde0(energy[istart:istop], mu[istart:istop], estep=estep, use_smooth=True)
+    if ix < 1 :
+        e0 = energy[istart+2]
     if group is not None:
         group = set_xafsGroup(group, _larch=_larch)
         group.e0 = e0
     return e0
 
-def _finde0(energy, mu):
-    if len(energy.shape) > 1:
-        energy = energy.squeeze()
+@Make_CallArgs(["energy","mu"])
+def find_e0_calc(energy, mu=None, group=None, **kws):
+    """find E0 for a spectrum from a calcution like FEFF or FDMNES,
+     which usually have a very small pre-edge section, but will
+     have robustly non-repeating energy values and low-noise
+
+    E0 is found as the point with maximum derivative with some checks to avoid spurious glitches.
+
+    Arguments:
+        energy (ndarray or group): array of x-ray energies, in eV, or group
+        mu     (ndaarray or None): array of mu(E) values
+        group  (group or None):    output group
+        kws    (ignored)
+
+    Returns:
+        float: Value of e0. If a group is provided, group.e0 will also be set.
+
+    Notes:
+        1. Supports :ref:`First Argument Group` convention, requiring group members `energy` and `mu`
+    """
+    energy, mu, group = parse_group_args(energy, members=('energy', 'mu'),
+                                         defaults=(mu,), group=group,
+                                         fcn_name='find_e0')
+    energy, mu = remove_nans2(energy, mu)
+    # first find e0 without smoothing, then refine with smoothing
+    dmude = np.gradient(mu)/np.gradient(energy)
+    imax = np.where(dmude > 0.99*dmude.max())[0]
+    return energy[imax]
+
+
+def find_energy_step(energy, frac_ignore=0.01, nave=10):
+    """robustly find energy step in XAS energy array,
+    ignoring the smallest fraction of energy steps (frac_ignore),
+    and averaging over the next `nave` values
+    """
+    nskip = int(frac_ignore*len(energy))
+    e_ordered = np.where(np.diff(np.argsort(energy))==1)[0]  # where energy step are in order
+    ediff = np.diff(energy[e_ordered][nskip:-nskip])
+    return ediff[np.argsort(ediff)][nskip:nskip+nave].mean()
+
+
+def _finde0(energy, mu_input, estep=None, use_smooth=True):
+    "internally used by find e0 "
+
+    en = remove_dups(energy, tiny=TINY_ENERGY)
+    ordered = np.where(np.diff(np.argsort(en))==1)[0]
+    en = en[ordered]
+    mu = mu_input[ordered]
+    if len(en.shape) > 1:
+        en = en.squeeze()
     if len(mu.shape) > 1:
         mu = mu.squeeze()
+    if estep is None:
+        estep = find_energy_step(en)
 
-    dmu = np.gradient(mu)/np.gradient(energy)
+
+    nmin = max(3, int(len(en)*0.02))
+    if use_smooth:
+        dmu = smooth(en, np.gradient(mu)/np.gradient(en), xstep=estep, sigma=estep)
+    else:
+        dmu = np.gradient(mu)/np.gradient(en)
     # find points of high derivative
     dmu[np.where(~np.isfinite(dmu))] = -1.0
-    nmin = max(3, int(len(dmu)*0.05))
-    maxdmu = max(dmu[nmin:-nmin])
+    dm_min = dmu[nmin:-nmin].min()
+    dm_ptp = max(1.e-10, np.ptp(dmu[nmin:-nmin]))
+    dmu = (dmu - dm_min)/dm_ptp
 
-    high_deriv_pts = np.where(dmu >  maxdmu*0.1)[0]
-    idmu_max, dmu_max = 0, 0
+    dhigh = 0.60 if len(en) > 20 else 0.30
+    high_deriv_pts = np.where(dmu > dhigh)[0]
+    if len(high_deriv_pts) < 3:
+        for _ in range(2):
+            if len(high_deriv_pts) > 3:
+                break
+            dhigh *= 0.5
+            high_deriv_pts = np.where(dmu > dhigh)[0]
 
+    if len(high_deriv_pts) < 3:
+        high_deriv_pts = np.where(np.isfinite(dmu))[0]
+
+    imax, dmax = 0, 0
     for i in high_deriv_pts:
-        if i < nmin or i > len(energy) - nmin:
+        if i < nmin or i > len(en) - nmin:
             continue
-        if (dmu[i] > dmu_max and
+        if (dmu[i] > dmax and
             (i+1 in high_deriv_pts) and
             (i-1 in high_deriv_pts)):
-            idmu_max, dmu_max = i, dmu[i]
-
-    return energy[idmu_max]
+            imax, dmax = i, dmu[i]
+    return en[imax], imax, estep
 
 def flat_resid(pars, en, mu):
-    return (pars['c0'] + en * (pars['c1'] + en * pars['c2']) - mu)
+    return pars['c0'] + en * (pars['c1'] + en * pars['c2']) - mu
 
-
-def preedge(energy, mu, e0=None, step=None, nnorm=None, nvict=0, pre1=None,
-            pre2=None, norm1=None, norm2=None):
+def preedge(energy, mu, e0=None, step=None, nnorm=None, nvict=0, npre=1, pre1=None,
+            pre2=None, norm1=None, norm2=None, iscalc=False):
     """pre edge subtraction, normalization for XAFS (straight python)
 
     This performs a number of steps:
@@ -108,11 +172,14 @@ def preedge(energy, mu, e0=None, step=None, nnorm=None, nvict=0, pre1=None,
     step:    edge jump.  If None, it will be determined here.
     pre1:    low E range (relative to E0) for pre-edge fit
     pre2:    high E range (relative to E0) for pre-edge fit
+    npre:    degree for pre-edge fit: 1 for linear, 0 for constant
     nvict:   energy exponent to use for pre-edg fit.  See Note
     norm1:   low E range (relative to E0) for post-edge fit
     norm2:   high E range (relative to E0) for post-edge fit
     nnorm:   degree of polynomial (ie, nnorm+1 coefficients will be found) for
              post-edge normalization curve. Default=None -- see note.
+    iscalc   whether to treat spectrum as calculation.
+
     Returns
     -------
       dictionary with elements (among others)
@@ -124,24 +191,33 @@ def preedge(energy, mu, e0=None, step=None, nnorm=None, nvict=0, pre1=None,
 
     Notes
     -----
-    1  pre_edge: a line is fit to mu(energy)*energy**nvict over the region,
-       energy=[e0+pre1, e0+pre2]. pre1 and pre2 default to None, which will set
+    1  pre_edge: if npre=1 (default), a line is fit to mu(energy)*energy**nvict
+       over the region, energy=[e0+pre1, e0+pre2].
+       pre1 and pre2 default to None, which will set
            pre1 = e0 - 2nd energy point, rounded to 5 eV
            pre2 = roughly pre1/3.0, rounded to 5 eV
+       if npre=0, a constont (mean value of mu[e0+pre1, e0+pre2] will be used.
 
-    2  post-edge: a polynomial of order nnorm is fit to mu(energy)*energy**nvict
-       between energy=[e0+norm1, e0+norm2]. nnorm, norm1, norm2 default to None,
+    2  post-edge: a polynomial of order nnorm is fit to mu-pre_edge betweeen
+       energy=[e0+norm1, e0+norm2]. nnorm, norm1, norm2 all default to None,
        which will set:
-         nnorm = 2 in norm2-norm1>350, 1 if norm2-norm1>50, or 0 if less.
+         nnorm = 2 in norm2-norm1>300, 1 if norm2-norm1>30, or 0 if less.
          norm2 = max energy - e0, rounded to 5 eV
          norm1 = roughly min(150, norm2/3.0), rounded to 5 eV
     """
-    energy = remove_dups(energy)
+
+    energy, mu = remove_nans2(energy, mu)
+    energy = remove_dups(energy, tiny=TINY_ENERGY)
+    if energy.size <= 1:
+        raise ValueError("energy array must have at least 2 points")
     if e0 is None or e0 < energy[1] or e0 > energy[-2]:
-        e0 = _finde0(energy, mu)
+        if iscalc:
+            e0 = find_e0_calc(energy, mu)
+        else:
+            e0 = find_e0(energy, mu)
 
     ie0 = index_nearest(energy, e0)
-    e0 = energy[ie0]
+    e0 = float(energy[ie0])
 
     if pre1 is None:
         # skip first energy point, often bad
@@ -149,69 +225,99 @@ def preedge(energy, mu, e0=None, step=None, nnorm=None, nvict=0, pre1=None,
             pre1  = 5.0*round((energy[1] - e0)/5.0)
         else:
             pre1  = 2.0*round((energy[1] - e0)/2.0)
-
     pre1 = max(pre1,  (min(energy) - e0))
     if pre2 is None:
-        pre2 = 5.0*round(pre1/15.0)
+        pre2 = 0.5*pre1
     if pre1 > pre2:
         pre1, pre2 = pre2, pre1
+    if iscalc:
+        pre1 = pre2 = energy[0] - e0
+        ipre1 = ipre2 = 0
+
+    ipre1 = index_of(energy-e0, pre1)
+    ipre2 = index_of(energy-e0, pre2)
+    if (ipre2 - ipre1) < 3:
+        nvict = 0
+        npre = 0
 
     if norm2 is None:
         norm2 = 5.0*round((max(energy) - e0)/5.0)
     if norm2 < 0:
         norm2 = max(energy) - e0 - norm2
     norm2 = min(norm2, (max(energy) - e0))
+
     if norm1 is None:
-        norm1 = min(150, 5.0*round(norm2/15.0))
+        norm1 = min(25, 5.0*round(norm2/15.0))
+
     if norm1 > norm2:
         norm1, norm2 = norm2, norm1
+
+    norm1 = min(norm1, norm2 - 2)
+
     if nnorm is None:
         nnorm = 2
-        if norm2-norm1 < 350: nnorm = 1
-        if norm2-norm1 <  50: nnorm = 0
-    nnorm = max(min(nnorm, MAX_NNORM), 0)
+        if norm2-norm1 < 300: nnorm = 1
+        if norm2-norm1 <  30: nnorm = 0
 
+    nnorm = max(min(nnorm, MAX_NNORM), 0)
     # preedge
     p1 = index_of(energy, pre1+e0)
     p2 = index_nearest(energy, pre2+e0)
-    if p2-p1 < 2:
-        p2 = min(len(energy), p1 + 2)
+    if iscalc:
+        pre_edge = mu[0] * np.ones(len(energy))
+        precoefs = [mu[0], 0.0]
+        npre = 0
+    elif npre == 0:
+        if p2 == p1:
+            p2 = p2 + 1
+        mu_mean = mu[p1:p2].mean()
+        pre_edge = mu_mean * np.ones(len(energy))
+        precoefs = [mu_mean, 0.0]
+    else:
+        if p2-p1 < 2:
+            p2 = min(len(energy), p1 + 2)
+        omu  = mu*energy**nvict
+        ex = remove_nans(energy[p1:p2], interp=True)
+        mx = remove_nans(omu[p1:p2], interp=True)
 
-    omu  = mu*energy**nvict
-    ex, mx = remove_nans2(energy[p1:p2], omu[p1:p2])
-    precoefs = polyfit(ex, mx, 1)
-    pre_edge = (precoefs[0] * energy + precoefs[1]) * energy**(-nvict)
+        precoefs = polyfit(ex, mx, 1)
+        if len(precoefs) == 1:
+            precoefs.append(0.0)
+        pre_edge = (precoefs[0] + energy*precoefs[1]) * energy**(-nvict)
 
     # normalization
     p1 = index_of(energy, norm1+e0)
     p2 = index_nearest(energy, norm2+e0)
+    if p1 > len(energy)-3:
+        p1 = len(energy)-3
     if p2-p1 < 2:
-        p2 = min(len(energy), p1 + 2)
+        p1 = p1 - 2
+        nnorm = 0
+    elif p2-p1 < 5:
+        nnorm = min(1, nnorm)
 
     presub = (mu-pre_edge)[p1:p2]
     coefs = polyfit(energy[p1:p2], presub, nnorm)
     post_edge = 1.0*pre_edge
     norm_coefs = []
-    for n, c in enumerate(reversed(list(coefs))):
+    for n, c in enumerate(coefs):
         post_edge += c * energy**(n)
         norm_coefs.append(c)
     edge_step = step
     if edge_step is None:
         edge_step = post_edge[ie0] - pre_edge[ie0]
-    edge_step = abs(edge_step)
-
+    edge_step = max(1.e-12, abs(float(edge_step)))
     norm = (mu - pre_edge)/edge_step
-    return {'e0': e0, 'edge_step': edge_step, 'norm': norm,
+    return {'e0': float(e0), 'edge_step': float(edge_step), 'norm': norm,
             'pre_edge': pre_edge, 'post_edge': post_edge,
             'norm_coefs': norm_coefs, 'nvict': nvict,
-            'nnorm': nnorm, 'norm1': norm1, 'norm2': norm2,
-            'pre1': pre1, 'pre2': pre2, 'precoefs': precoefs}
+            'nnorm': nnorm, 'norm1': float(norm1), 'norm2': float(norm2),
+            'pre1': float(pre1), 'pre2': float(pre2), 'precoefs': precoefs}
 
 @Make_CallArgs(["energy","mu"])
-
 def pre_edge(energy, mu=None, group=None, e0=None, step=None, nnorm=None,
-             nvict=0, pre1=None, pre2=None, norm1=None, norm2=None,
-             make_flat=True, _larch=None):
+             nvict=0, npre=1, pre1=None, pre2=None, norm1=None, norm2=None,
+             make_flat=True, iscalc=False, _larch=None):
     """pre edge subtraction, normalization for XAFS
 
     This performs a number of steps:
@@ -230,12 +336,14 @@ def pre_edge(energy, mu=None, group=None, e0=None, step=None, nnorm=None,
     step:    edge jump.  If None, it will be determined here.
     pre1:    low E range (relative to E0) for pre-edge fit
     pre2:    high E range (relative to E0) for pre-edge fit
+    npre:    degree for pre-edge fit: 1 for linear, 0 for constant
     nvict:   energy exponent to use for pre-edg fit.  See Notes.
     norm1:   low E range (relative to E0) for post-edge fit
     norm2:   high E range (relative to E0) for post-edge fit
     nnorm:   degree of polynomial (ie, nnorm+1 coefficients will be found) for
              post-edge normalization curve. See Notes.
     make_flat: boolean (Default True) to calculate flattened output.
+    iscalc:  is a calculated spectrum, with very limited pre-edge
 
     Returns
     -------
@@ -247,7 +355,8 @@ def pre_edge(energy, mu=None, group=None, e0=None, step=None, nnorm=None,
         flat        flattened, normalized mu(E)
         pre_edge    determined pre-edge curve
         post_edge   determined post-edge, normalization curve
-        dmude       derivative of mu(E)
+        dmude       derivative of normalized mu(E)
+        d2mude      second derivative of normalized mu(E)
 
     (if the output group is None, _sys.xafsGroup will be written to)
 
@@ -255,33 +364,43 @@ def pre_edge(energy, mu=None, group=None, e0=None, step=None, nnorm=None,
     -----
       1. Supports `First Argument Group` convention, requiring group members `energy` and `mu`.
       2. Support `Set XAFS Group` convention within Larch or if `_larch` is set.
-      3. pre_edge: a line is fit to mu(energy)*energy**nvict over the region,
-         energy=[e0+pre1, e0+pre2]. pre1 and pre2 default to None, which will set
+      3. pre_edge: if npre=1 (default), a line is fit to mu(energy)*energy**nvict
+         over the region, energy=[e0+pre1, e0+pre2].
+         pre1 and pre2 default to None, which will set
              pre1 = e0 - 2nd energy point, rounded to 5 eV
              pre2 = roughly pre1/3.0, rounded to 5 eV
+         if npre=0, a constont (mean value of mu[e0+pre1, e0+pre2] will be used.
       4. post-edge: a polynomial of order nnorm is fit to mu(energy)*energy**nvict
          between energy=[e0+norm1, e0+norm2]. nnorm, norm1, norm2 default to None,
          which will set:
               norm2 = max energy - e0, rounded to 5 eV
               norm1 = roughly min(150, norm2/3.0), rounded to 5 eV
-              nnorm = 2 in norm2-norm1>350, 1 if norm2-norm1>50, or 0 if less.
+              nnorm = 2 in norm2-norm1>300, 1 if norm2-norm1>30, or 0 if less.
       5. flattening fits a quadratic curve (no matter nnorm) to the post-edge
          normalized mu(E) and subtracts that curve from it.
     """
-
     energy, mu, group = parse_group_args(energy, members=('energy', 'mu'),
                                          defaults=(mu,), group=group,
                                          fcn_name='pre_edge')
+    energy, mu = remove_nans2(energy, mu)
     if len(energy.shape) > 1:
         energy = energy.squeeze()
     if len(mu.shape) > 1:
         mu = mu.squeeze()
 
+    out_of_order = np.where(np.diff(np.argsort(energy))!=1)[0]
+    if len(out_of_order) > 0:
+        order = np.argsort(energy)
+        energy = energy[order]
+        mu = mu[order]
+    energy = remove_dups(energy, tiny=TINY_ENERGY)
+
+    if group is not None and e0 is None:
+        e0 = getattr(group, 'e0', None)
+
     pre_dat = preedge(energy, mu, e0=e0, step=step, nnorm=nnorm,
-                      nvict=nvict, pre1=pre1, pre2=pre2, norm1=norm1,
-                      norm2=norm2)
-
-
+                      nvict=nvict, npre=npre, pre1=pre1, pre2=pre2,
+                      norm1=norm1, norm2=norm2, iscalc=iscalc)
     group = set_xafsGroup(group, _larch=_larch)
 
     e0    = pre_dat['e0']
@@ -290,49 +409,69 @@ def pre_edge(energy, mu=None, group=None, e0=None, step=None, nnorm=None,
     norm2 = pre_dat['norm2']
     # generate flattened spectra, by fitting a quadratic to .norm
     # and removing that.
-    flat = norm
+
     ie0 = index_nearest(energy, e0)
     p1 = index_of(energy, norm1+e0)
     p2 = index_nearest(energy, norm2+e0)
     if p2-p1 < 2:
         p2 = min(len(energy), p1 + 2)
 
-    if make_flat and p2-p1 > 4:
-        enx, mux = remove_nans2(energy[p1:p2], norm[p1:p2])
+    group.e0 = e0
+    group.norm = norm
+    group.flat = 1.0*norm
+    group.norm_poly = 1.0*norm
+
+    if make_flat:
+        pre_edge = pre_dat['pre_edge']
+        post_edge = pre_dat['post_edge']
+        edge_step = pre_dat['edge_step']
+        flat_residue = (post_edge - pre_edge)/edge_step
+        flat = norm - flat_residue + flat_residue[ie0]
+        flat[:ie0] = norm[:ie0]
+        group.flat = flat
+
+        enx = remove_nans(energy[p1:p2], interp=True)
+        mux = remove_nans(norm[p1:p2], interp=True)
+
         # enx, mux = (energy[p1:p2], norm[p1:p2])
         fpars = Parameters()
         ncoefs = len(pre_dat['norm_coefs'])
-        fpars.add('c0', value=0, vary=True)
-        fpars.add('c1', value=0, vary=(ncoefs>1))
-        fpars.add('c2', value=0, vary=(ncoefs>2))
-        fit = Minimizer(flat_resid, fpars, fcn_args=(enx, mux))
-        result = fit.leastsq(xtol=1.e-6, ftol=1.e-6)
+        fpars.add('c0', value=1.0, vary=True)
+        fpars.add('c1', value=0.0, vary=False)
+        fpars.add('c2', value=0.0, vary=False)
+        if ncoefs > 1:
+            fpars['c1'].set(value=1.e-5, vary=True)
+            if ncoefs > 2:
+                fpars['c2'].set(value=1.e-5, vary=True)
 
-        fc0 = result.params['c0'].value
-        fc1 = result.params['c1'].value
-        fc2 = result.params['c2'].value
+        try:
+            fit = Minimizer(flat_resid, fpars, fcn_args=(enx, mux))
+            result = fit.leastsq()
+            fc0 = result.params['c0'].value
+            fc1 = result.params['c1'].value
+            fc2 = result.params['c2'].value
 
-        flat_diff   = fc0 + energy * (fc1 + energy * fc2)
-        flat        = norm - (flat_diff  - flat_diff[ie0])
-        flat[:ie0]  = norm[:ie0]
+            flat_diff = fc0 + energy * (fc1 + energy * fc2)
+            flat_alt  = norm - flat_diff  + flat_diff[ie0]
+            flat_alt[:ie0]  = norm[:ie0]
+            group.flat_coefs = (fc0, fc1, fc2)
+            group.flat_alt = flat_alt
+        except:
+            pass
 
-
-    group.e0 = e0
-    group.norm = norm
-    group.norm_poly = 1.0*norm
-    group.flat = flat
-    group.dmude = np.gradient(mu)/np.gradient(energy)
+    group.dmude = np.gradient(norm)/np.gradient(energy)
+    group.d2mude = np.gradient(group.dmude)/np.gradient(energy)
     group.edge_step  = pre_dat['edge_step']
     group.edge_step_poly = pre_dat['edge_step']
     group.pre_edge   = pre_dat['pre_edge']
     group.post_edge  = pre_dat['post_edge']
 
     group.pre_edge_details = Group()
-    for attr in ('pre1', 'pre2', 'norm1', 'norm2', 'nnorm', 'nvict'):
+    for attr in ('pre1', 'pre2', 'norm1', 'norm2', 'nnorm', 'nvict', 'npre'):
         setattr(group.pre_edge_details, attr, pre_dat.get(attr, None))
 
-    group.pre_edge_details.pre_slope  = pre_dat['precoefs'][0]
-    group.pre_edge_details.pre_offset = pre_dat['precoefs'][1]
+    group.pre_edge_details.pre_offset = pre_dat['precoefs'][0]
+    group.pre_edge_details.pre_slope  = pre_dat['precoefs'][1]
 
     for i in range(MAX_NNORM):
         if hasattr(group, 'norm_c%i' % i):
@@ -344,253 +483,93 @@ def pre_edge(energy, mu=None, group=None, e0=None, step=None, nnorm=None,
     group.atsym = getattr(group, 'atsym', None)
     group.edge = getattr(group, 'edge', None)
 
-    if group.atsym is None or group.edge is None:
+    if (group.atsym is None or group.edge is None) and group.e0 > 10:
         _atsym, _edge = guess_edge(group.e0)
         if group.atsym is None: group.atsym = _atsym
         if group.edge is None:  group.edge = _edge
     return
 
-
-@Make_CallArgs(["energy", "norm"])
-def prepeaks_setup(energy, norm=None, group=None, emin=None, emax=None,
-                   elo=None, ehi=None, _larch=None):
-    """set up pre edge peak group.
-
-    This assumes that pre_edge() has been run successfully on the spectra
-    and that the spectra has decent pre-edge subtraction and normalization.
-
-    Arguments:
-       energy (ndarray or group): array of x-ray energies, in eV, or group (see note 1)
-       norm (ndarray or None):    array of normalized mu(E)
-       group (group or None):     output group
-       emax (float or None):      max energy (eV) to use for baesline fit [e0-5]
-       emin (float or None):      min energy (eV) to use for baesline fit [e0-40]
-       elo: (float or None)       low energy of pre-edge peak region to not fit baseline [e0-20]
-       ehi: (float or None)       high energy of pre-edge peak region ot not fit baseline [e0-10]
-       _larch (larch instance or None):  current larch session.
-
-    A group named `prepeaks` will be created in the output group, containing:
-
-        ==============   ===========================================================
-         attribute        meaning
-        ==============   ===========================================================
-         energy           energy array for pre-edge peaks = energy[emin:emax]
-         norm             spectrum over pre-edge peak energies
-        ==============   ===========================================================
-
-    Notes:
-        1. Supports :ref:`First Argument Group` convention, requiring group members `energy` and `norm`
-        2. Supports :ref:`Set XAFS Group` convention within Larch or if `_larch` is set.
+def energy_align(group, reference, array='dmude', emin=-15, emax=35):
     """
-    energy, norm, group = parse_group_args(energy, members=('energy', 'norm'),
-                                           defaults=(norm,), group=group,
-                                           fcn_name='pre_edge_baseline')
+    align XAFS data group to a reference group
 
-    if len(energy.shape) > 1:
-        energy = energy.squeeze()
-    if len(norm.shape) > 1:
-        norm = norm.squeeze()
+    Arguments
+    ---------
+    group      Larch group for spectrum to be aligned (see Note 1)
+    reference  Larch group for reference spectrum     (see Note 1)
+    array      string of 'dmude', 'norm', or 'mu'     (see Note 2) ['dmude']
+    emin       float, min energy relative to e0 of reference for alignment [-15]
+    emax       float, max energy relative to e0 of reference for alignment [+35]
 
-    dat_emin, dat_emax = min(energy), max(energy)
-    dat_e0 = getattr(group, 'e0', -1)
+    Returns
+    -------
+    eshift   energy shift to add to group.energy to match reference.
+             This value will also be written to group.eshift
 
-    if dat_e0 > 0:
-        if emin is None:
-            emin = dat_e0 - 30.0
-        if emax is None:
-            emax = dat_e0 - 1.0
-        if elo is None:
-            elo = dat_e0 - 15.0
-        if ehi is None:
-            ehi = dat_e0 - 5.0
-        if emin < 0:
-            emin += dat_e0
-        if elo < 0:
-            elo += dat_e0
-        if emax < dat_emin:
-            emax += dat_e0
-        if ehi < dat_emin:
-            ehi += dat_e0
+    Notes
+    -----
+      1.  Both group and reference must be XAFS data, with arrays of 'energy' and 'mu'.
+          The reference group must already have an e0 value set.
 
-    if emax is None or emin is None or elo is None or ehi is None:
-        raise ValueError("must provide emin and emax to prepeaks_setup")
-
-
-    # get indices for input energies
-    if emin > emax:
-        emin, emax = emax, emin
-    if emin > elo:
-        elo, emin = emin, elo
-    if ehi > emax:
-        ehi, emax = emax, ehi
-
-    dele = 1.e-13 + min(np.diff(energy))/5.0
-
-    ilo  = index_of(energy, elo+dele)
-    ihi  = index_of(energy, ehi+dele)
-    imin = index_of(energy, emin+dele)
-    imax = index_of(energy, emax+dele)
-
-    edat = energy[imin: imax+1]
-    norm = norm[imin:imax+1]
-
-    if not hasattr(group, 'prepeaks'):
-        group.prepeaks = Group(energy=edat, norm=norm,
-                               emin=emin, emax=emax,
-                               elo=elo, ehi=ehi)
-    else:
-        group.prepeaks.energy = edat
-        group.prepeaks.norm = norm
-        group.prepeaks.emin = emin
-        group.prepeaks.emax = emax
-        group.prepeaks.elo = elo
-        group.prepeaks.ehi = ehi
-
-    group.prepeaks.xdat = edat
-    group.prepeaks.ydat = norm
-    return
-
-@Make_CallArgs(["energy", "norm"])
-def pre_edge_baseline(energy, norm=None, group=None, form='lorentzian',
-                      emin=None, emax=None, elo=None, ehi=None,
-                      with_line=True, _larch=None):
-    """remove baseline from main edge over pre edge peak region
-
-    This assumes that pre_edge() has been run successfully on the spectra
-    and that the spectra has decent pre-edge subtraction and normalization.
-
-    Arguments:
-       energy (ndarray or group): array of x-ray energies, in eV, or group (see note 1)
-       norm (ndarray or group):   array of normalized mu(E)
-       group (group or None):     output group
-       elo (float or None):       low energy of pre-edge peak region to not fit baseline [e0-20]
-       ehi (float or None):       high energy of pre-edge peak region ot not fit baseline [e0-10]
-       emax (float or None):      max energy (eV) to use for baesline fit [e0-5]
-       emin (float or None):      min energy (eV) to use for baesline fit [e0-40]
-       form (string):             form used for baseline (see note 2)  ['lorentzian']
-       with_line (bool):          whether to include linear component in baseline ['True']
-       _larch (larch instance or None):  current larch session.
-
-
-    A function will be fit to the input mu(E) data over the range between
-    [emin:elo] and [ehi:emax], ignorng the pre-edge peaks in the region
-    [elo:ehi].  The baseline function is specified with the `form` keyword
-    argument, which can be one of 'lorentzian', 'gaussian', or 'voigt',
-    with 'lorentzian' the default.  In addition, the `with_line` keyword
-    argument can be used to add a line to this baseline function.
-
-    A group named 'prepeaks' will be used or created in the output group, containing
-
-        ==============   ===========================================================
-         attribute        meaning
-        ==============   ===========================================================
-         energy           energy array for pre-edge peaks = energy[emin:emax]
-         energy           energy array for pre-edge peaks = energy[emin:emax]
-         baseline         fitted baseline array over pre-edge peak energies
-         norm             spectrum over pre-edge peak energies
-         peaks            baseline-subtraced spectrum over pre-edge peak energies
-         centroid         estimated centroid of pre-edge peaks (see note 3)
-         peak_energies    list of predicted peak energies (see note 4)
-         fit_details      details of fit to extract pre-edge peaks.
-        ==============   ===========================================================
-
-    Notes:
-       1. Supports :ref:`First Argument Group` convention, requiring group members `energy` and `norm`
-       2. Supports :ref:`Set XAFS Group` convention within Larch or if `_larch` is set.
-       3. The value calculated for `prepeaks.centroid`  will be found as
-          (prepeaks.energy*prepeaks.peaks).sum() / prepeaks.peaks.sum()
-       4. The values in the `peak_energies` list will be predicted energies
-          of the peaks in `prepeaks.peaks` as found by peakutils.
+      2.  The alignment can be done with 'mu' or 'dmude'.  If it does not exist, the
+          dmude array will be built for group and reference.
 
     """
-    energy, norm, group = parse_group_args(energy, members=('energy', 'norm'),
-                                           defaults=(norm,), group=group,
-                                           fcn_name='pre_edge_baseline')
+    if not (hasattr(group, 'energy') and hasattr(group, 'mu')):
+        raise ValueError("group must have attributes 'energy' and 'mu'")
 
-    prepeaks_setup(energy, norm=norm, group=group, emin=emin, emax=emax,
-                   elo=elo, ehi=ehi, _larch=_larch)
-
-    emin = group.prepeaks.emin
-    emax = group.prepeaks.emax
-    elo = group.prepeaks.elo
-    ehi = group.prepeaks.ehi
-
-    dele = 1.e-13 + min(np.diff(energy))/5.0
-
-    imin = index_of(energy, emin+dele)
-    ilo  = index_of(energy, elo+dele)
-    ihi  = index_of(energy, ehi+dele)
-    imax = index_of(energy, emax+dele)
-
-    # build xdat, ydat: dat to fit (skipping pre-edge peaks)
-    xdat = np.concatenate((energy[imin:ilo+1], energy[ihi:imax+1]))
-    ydat = np.concatenate((norm[imin:ilo+1], norm[ihi:imax+1]))
+    if not hasattr(group, 'dmude'):
+        mu = getattr(group, 'norm', getattr(group, 'mu'))
+        en = getattr(group, 'energy')
+        group.dmude = gradient(mu)/gradient(en)
 
 
-    # build fitting model: note that we always include
-    # a LinearModel but may fix slope and intercept
-    form = form.lower()
-    if form.startswith('voig'):
-        model = VoigtModel()
-    elif form.startswith('gaus'):
-        model = GaussianModel()
-    else:
-        model = LorentzianModel()
+    if not (hasattr(reference, 'energy') and hasattr(reference, 'mu')
+            and hasattr(reference, 'e0') ):
+        raise ValueError("reference must have attributes 'energy', 'mu', and 'e0'")
 
-    model += LinearModel()
-    params = model.make_params(amplitude=1.0, sigma=2.0,
-                               center=emax,
-                               intercept=0, slope=0)
-    params['amplitude'].min =  0.0
-    params['sigma'].min     =  0.25
-    params['sigma'].max     = 50.0
-    params['center'].max    = emax + 25.0
-    params['center'].min    = emax - 25.0
+    if not hasattr(reference, 'dmude'):
+        mu = getattr(reference, 'norm', getattr(reference, 'mu'))
+        en = getattr(reference, 'energy')
+        reference.dmude = gradient(mu)/gradient(en)
 
-    if not with_line:
-        params['slope'].vary = False
-        params['intercept'].vary = False
+    xdat = group.energy[:]*1.0
+    xref = reference.energy[:]*1.0
+    ydat = group.dmude[:]*1.0
+    yref = reference.dmude[:]*1.0
+    if array == 'mu':
+        ydat = group.mu[:]*1.0
+        yref = reference.mu[:]*1.0
+    elif array == 'norm':
+        ydat = group.norm[:]*1.0
+        yref = reference.norm[:]*1.0
 
-    result = model.fit(ydat, params, x=xdat)
+    xdat = remove_nans(xdat[:], interp=True)
+    ydat = remove_nans(ydat[:], interp=True)
+    xref = remove_nans(xref[:], interp=True)
+    yref = remove_nans(yref[:], interp=True)
 
-    cen = dcen = 0.
-    peak_energies = []
+    i1 = index_of(xref, reference.e0-emin)
+    i2 = index_of(xref, reference.e0+emax)
 
-    # energy including pre-edge peaks, for output
-    edat = energy[imin: imax+1]
-    norm = norm[imin:imax+1]
-    bline = peaks = dpeaks = norm*0.0
+    def align_resid(params, xdat, ydat, xref, yref, i1, i2):
+        "fit residual"
+        newx = xdat + params['eshift'].value
+        scale = params['scale'].value
+        ytmp = interp(newx, ydat, xref, kind='cubic')
+        return (ytmp*scale - yref)[i1:i2]
 
-    # get baseline and resulting norm over edat range
-    if result is not None:
-        bline = result.eval(result.params, x=edat)
-        peaks = norm-bline
+    params = Parameters()
+    params.add('eshift', value=0, min=-50, max=50)
+    params.add('scale', value=1, min=0, max=50)
 
-        # estimate centroid
-        cen = (edat*peaks).sum() / peaks.sum()
+    try:
+        fit = Minimizer(align_resid, params,
+                        fcn_args=(xdat, ydat, xref, yref, i1, i2))
+        result = fit.leastsq()
+        eshift = result.params['eshift'].value
+    except:
+        eshift = 0
 
-        # uncertainty in norm includes only uncertainties in baseline fit
-        # and uncertainty in centroid:
-        try:
-            dpeaks = result.eval_uncertainty(result.params, x=edat)
-        except:
-            dbpeaks = 0.0
-
-        cen_plus = (edat*(peaks+dpeaks)).sum()/ (peaks+dpeaks).sum()
-        cen_minus = (edat*(peaks-dpeaks)).sum()/ (peaks-dpeaks).sum()
-        dcen = abs(cen_minus - cen_plus) / 2.0
-
-        # locate peak positions
-        if HAS_PEAKUTILS:
-            peak_ids = peakutils.peak.indexes(peaks, thres=0.05, min_dist=2)
-            peak_energies = [edat[pid] for pid in peak_ids]
-
-    group = set_xafsGroup(group, _larch=_larch)
-    group.prepeaks = Group(energy=edat, norm=norm, baseline=bline,
-                           peaks=peaks, delta_peaks=dpeaks,
-                           centroid=cen, delta_centroid=dcen,
-                           peak_energies=peak_energies,
-                           fit_details=result,
-                           emin=emin, emax=emax, elo=elo, ehi=ehi,
-                           form=form, with_line=with_line)
-    return
+    group.eshift = eshift
+    return eshift

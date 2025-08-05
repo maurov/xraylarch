@@ -1,4 +1,3 @@
-
 import time
 import numpy as np
 from scipy.special import erfc
@@ -8,12 +7,6 @@ from larch.math import interp
 from larch.utils.show import show
 
 from .mback import mback
-
-try:
-    from larch.wxlib   import _newplot, _plot
-    HASPLOT = True
-except:
-    HASPLOT = False
 
 pi = np.pi
 
@@ -263,7 +256,7 @@ class diffKKGroup(Group):
         if self.mback_kws is not None:
             mb_kws.update(self.mback_kws)
 
-        start = time.clock()
+        start = time.monotonic()
 
         mback(self.energy, self.mu, group=self, **mb_kws)
 
@@ -284,7 +277,7 @@ class diffKKGroup(Group):
         ## clean up group
         #for att in ('normalization_function', 'weight', 'grid'):
         #    if hasattr(self, att): delattr(self, att)
-        finish = time.clock()
+        finish = time.monotonic()
         self.time_elapsed = float(finish-start)
 
 def diffkk(energy=None, mu=None, z=None, edge='K', mback_kws=None, **kws):

@@ -1,16 +1,15 @@
 #!/usr/bin/env python
-
+"""
+Larch command-line shell
+"""
 import cmd
 import os
 import sys
-import numpy
-import matplotlib
-
-from .symboltable import SymbolTable
+import signal
 from .interpreter import Interpreter
-from .site_config import history_file, show_site_config
-from .version import __version__, __date__, make_banner
-from .inputText import InputText
+
+from .site_config import history_file
+from .version import make_banner
 from .larchlib import StdWriter
 from .utils import uname
 
@@ -28,16 +27,17 @@ try:
 except ImportError:
     wx = None
 
+SHOW_LIBS = ['numpy', 'scipy', 'matplotlib', 'h5py',
+             'lmfit', 'xraydb', 'wx','wxmplot']
 
-class shell(cmd.Cmd):
+class Shell(cmd.Cmd):
+    """command shell for Larch"""
     def __init__(self,  completekey='tab', debug=False, quiet=False,
                  stdin=None, stdout=None, banner_msg=None,
-                 maxhist=25000, with_wx=False, with_plugins=True):
+                 maxhist=25000, with_wx=False):
 
         self.debug  = debug
         cmd.Cmd.__init__(self,completekey='tab')
-        homedir = os.environ.get('HOME', os.getcwd())
-
         if stdin is not None:
             sys.stdin = stdin
         if stdout is not None:
@@ -49,35 +49,39 @@ class shell(cmd.Cmd):
             try:
                 readline.read_history_file(history_file)
             except IOError:
-                print('could not read history from %s' % history_file)
+                print(f'could not read history from {history_file}')
 
-        self.larch = Interpreter(with_plugins=with_plugins,
-                                 historyfile=history_file,
+
+        self.larch = Interpreter(historyfile=history_file,
                                  maxhistory=maxhist)
         self.larch.writer = StdWriter(_larch=self.larch)
 
         if with_wx and HAS_WXPYTHON:
             symtable = self.larch.symtable
+            try:
+                from .wxlib import LarchWxApp, inputhook
+                app = LarchWxApp(redirect=False, clearSigInt=False)
+                symtable.set_symbol('_sys.wx.wxapp', app)
+                symtable.set_symbol('_sys.wx.force_wxupdate', False)
+                symtable.set_symbol('_sys.wx.parent', None)
+                symtable.set_symbol('_sys.wx.inputhook', inputhook)
+                if uname == 'darwin':
+                    symtable.set_symbol('_sys.wx.ping', inputhook.ping_darwin)
+                else:
+                    symtable.set_symbol('_sys.wx.ping', inputhook.ping)
 
-            app = wx.App(redirect=False, clearSigInt=False)
-            symtable.set_symbol('_sys.wx.wxapp', app)
-            symtable.set_symbol('_sys.wx.force_wxupdate', False)
-            symtable.set_symbol('_sys.wx.parent', None)
+                inputhook.ON_INTERRUPT = self.onCtrlC
+                inputhook.WXLARCH_SYM = symtable
+            except:
+                pass
 
-            def onCtrlC(*args, **kws): return 0
-
-            from .wxlib import inputhook
-            symtable.set_symbol('_sys.wx.inputhook', inputhook)
-            symtable.set_symbol('_sys.wx.ping',   inputhook.ping)
-            inputhook.ON_INTERRUPT = onCtrlC
-            inputhook.WXLARCH_SYM = symtable
-
+        signal.signal(signal.SIGINT, self.onCtrlC)
         self.prompt = self.larch.input.prompt
         writer = self.larch.writer
-        self.color_writer = uname != 'win' and hasattr(writer, 'set_textstyle')
+        self.color_writer = (uname != 'win' and hasattr(writer, 'set_textstyle'))
         if not quiet:
             if banner_msg is None:
-                banner_msg = make_banner(mods=[wx])
+                banner_msg = make_banner(show_libraries=SHOW_LIBS)
             if self.color_writer:
                 writer.set_textstyle('error')
             writer.write(banner_msg)
@@ -85,9 +89,15 @@ class shell(cmd.Cmd):
             if self.color_writer:
                 writer.set_textstyle('text')
 
+        self.larch_execute = self.default
         self.larch.run_init_scripts()
 
+    def onCtrlC(self, *args, **kws):
+        self.larch.symtable.set_symbol('_sys.wx.keyboard_interrupt', True)
+        return 0
+
     def on_exit(self, text=None):
+        "exit"
         trim_last = False
         if text is not None:
             trim_last = text.strip() in ('quit', 'exit')
@@ -95,51 +105,52 @@ class shell(cmd.Cmd):
             self.larch.input.history.save(trim_last=trim_last)
         except PermissionError:
             print("Warning: could not save session history -- permission denied")
+        self.larch.symtable._plotter.close_all_displays()
         sys.exit()
 
-    def do_quit(self, text):
+    def do_exit(self, text):
+        "exit"
         self.on_exit(text=text)
 
-    def do_exit(self, text):
+    def do_quit(self, text):
+        "quit"
         self.on_exit(text=text)
 
     def emptyline(self):
         pass
 
-    def onecmd(self, txt):
-        return self.default(txt)
+    def onecmd(self, line):
+        "single command"
+        return self.default(line)
 
-    def do_help(self, txt):
-        if txt.startswith('(') and txt.endswith(')'):
-            txt = txt[1:-1]
-        elif txt.startswith("'") and txt.endswith("'"):
-            txt = txt[1:-1]
-        elif txt.startswith('"') and txt.endswith('"'):
-            txt = txt[1:-1]
-        self.default("help(%s)" % txt)
+    def do_help(self, arg):
+        "help"
+        if arg.startswith('(') and arg.endswith(')'):
+            arg = arg[1:-1]
+        elif arg.startswith("'") and arg.endswith("'"):
+            arg = arg[1:-1]
+        elif arg.startswith('"') and arg.endswith('"'):
+            arg = arg[1:-1]
+        self.default(f"help({arg})")
 
     def do_shell(self, txt):
+        "shell command"
         os.system(txt)
 
-    def larch_execute(self, text):
-        self.default(text)
-
-    def default(self, text):
-        if text.strip() in ('quit', 'exit', 'quit()', 'exit()', 'EOF'):
-            self.on_exit(text)
-        ret = self.larch.eval(text, fname='<stdin>', lineno=0)
+    def default(self, line):
+        "default handler"
+        if line.strip() in ('quit', 'exit', 'quit()', 'exit()', 'EOF'):
+            self.on_exit(line)
+        ret = self.larch.eval(line, fname='<stdin>', lineno=0)
         if self.larch.error:
             self.larch.input.clear()
             if self.color_writer:
                 self.larch.writer.set_textstyle('error')
             self.larch.show_errors()
             if self.color_writer:
-                self.larch.writer.set_textstyle('text')
+                self.larch.writer.set_textstyle('line')
         if ret is not None:
             self.larch.writer.write("%s\n" % repr(ret))
 
         self.larch.writer.flush()
         self.prompt = self.larch.input.next_prompt
-
-if __name__ == '__main__':
-    t = shell(debug=True).cmdloop()

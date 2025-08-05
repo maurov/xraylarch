@@ -10,12 +10,12 @@ import wx
 
 import larch
 from larch import Group
-from larch.io import fix_varname, read_athena
+from larch.io import read_athena
 
-from wxutils import (SimpleText, Button, Choice, GUIColors,
-                     FileCheckList, FileDropTarget, pack,
-                     Check, MenuItem, SetTip, Popup, CEN,
-                     LEFT, FRAMESTYLE, Font)
+from wxutils import (SimpleText, Button, Choice, FileCheckList,
+                     FileDropTarget, pack, Check, MenuItem, SetTip, Popup,
+                     CEN, LEFT, FRAMESTYLE, Font)
+from .wxcolors import GUI_COLORS
 
 from wxmplot import PlotPanel
 
@@ -23,14 +23,12 @@ CEN |=  wx.ALL
 
 class AthenaImporter(wx.Frame) :
     """Import Athena File"""
-    def __init__(self, parent, filename=None, read_ok_cb=None,
-                 size=(725, 450), _larch=None):
+    def __init__(self, parent, controller=None, filename=None, read_ok_cb=None,
+                 size=(725, 450)):
         self.parent = parent
         self.filename = filename
-        self.larch = _larch
+        self.controller = controller
         self.read_ok_cb = read_ok_cb
-
-        self.colors = GUIColors()
 
         wx.Frame.__init__(self, parent, -1,   size=size, style=FRAMESTYLE)
         splitter  = wx.SplitterWindow(self, style=wx.SP_LIVE_UPDATE)
@@ -45,6 +43,8 @@ class AthenaImporter(wx.Frame) :
 
         self.select_imported = sel_imp
         self.grouplist = FileCheckList(leftpanel, select_action=self.onShowGroup)
+        self.grouplist.SetForegroundColour(GUI_COLORS.list_fg)
+        self.grouplist.SetBackgroundColour(GUI_COLORS.list_bg)
 
         tsizer = wx.GridBagSizer(2, 2)
         tsizer.Add(sel_all, (0, 0), (1, 1), LEFT, 0)
@@ -63,9 +63,12 @@ class AthenaImporter(wx.Frame) :
 
         self.SetTitle("Reading Athena Project '%s'" % self.filename)
         self.title = SimpleText(rightpanel, self.filename, font=Font(13),
-                                colour=self.colors.title, style=LEFT)
+                                colour=GUI_COLORS.title, style=LEFT)
 
         self.plotpanel = PlotPanel(rightpanel, messenger=self.plot_messages)
+        plotconf = self.controller.get_config('plot')
+        self.plotpanel.conf.set_theme(plotconf['theme'])
+        self.plotpanel.conf.enable_grid(plotconf['show_grid'])
 
         sizer = wx.BoxSizer(wx.VERTICAL)
         sizer.Add(self.title, 0, LEFT, 2)
@@ -80,22 +83,36 @@ class AthenaImporter(wx.Frame) :
         for i in range(len(statusbar_fields)):
             self.statusbar.SetStatusText(statusbar_fields[i], i)
 
-        self.a_project = read_athena(self.filename, do_bkg=False, do_fft=False,
-                                     _larch=_larch)
-        self.allgroups = []
-        for item in self.a_project._athena_groups:
-            if not item.startswith('_athena_'):
-                self.allgroups.append(item)
-                self.grouplist.Append(item)
+        self.a_project = read_athena(self.filename, do_bkg=False, do_fft=False)
+        self.allgroups = {}
+        group0 = None
+        for sname, grp in self.a_project.groups.items():
+            if hasattr(grp, 'energy') and hasattr(grp, 'mu'):
+                label = getattr(grp, 'label', sname)
+                try:
+                    self.allgroups[label] = sname
+                    self.grouplist.Append(label)
+                except:
+                    print(' ? ', sname, label)
+                if group0 is None:
+                    group0 = sname
+        self.grouplist.SetCheckedStrings(list(self.allgroups.keys()))
         self.Show()
         self.Raise()
+
+        if group0 is not None:
+            grp = getattr(self.a_project, group0)
+            if hasattr(grp, 'energy') and hasattr(grp, 'mu'):
+                label = getattr(grp, 'label', group0)
+                self.plotpanel.plot(grp.energy, grp.mu,
+                                    xlabel='Energy', ylabel='mu',title=label)
 
     def plot_messages(self, msg, panel=1):
         self.SetStatusText(msg, panel)
 
     def onOK(self, event=None):
         """generate script to import groups"""
-        namelist = [str(n) for n in self.grouplist.GetCheckedStrings()]
+        namelist = [self.allgroups[n] for n in self.grouplist.GetCheckedStrings()]
         if len(namelist) == 0:
 
             cancel = Popup(self, """No data groups selected.
@@ -108,26 +125,22 @@ class AthenaImporter(wx.Frame) :
 
         if self.read_ok_cb is not None:
             self.read_ok_cb(self.filename, namelist)
-
         self.Destroy()
 
     def onCancel(self, event=None):
         self.Destroy()
 
     def onSelAll(self, event=None):
-        self.grouplist.SetCheckedStrings(self.allgroups)
+        self.grouplist.SetCheckedStrings(list(self.allgroups.keys()))
 
     def onSelNone(self, event=None):
         self.grouplist.SetCheckedStrings([])
 
     def onShowGroup(self, event=None):
         """column selections changed calc xdat and ydat"""
-        gname = event.GetString()
+        label = event.GetString()
+        gname = self.allgroups[label]
         grp = getattr(self.a_project, gname)
-        glist = list(self.grouplist.GetCheckedStrings())
-        if gname not in glist:
-            glist.append(gname)
-        self.grouplist.SetCheckedStrings(glist)
         if hasattr(grp, 'energy') and hasattr(grp, 'mu'):
             self.plotpanel.plot(grp.energy, grp.mu,
-                                xlabel='Energy', ylabel='mu',title=gname)
+                                xlabel='Energy', ylabel='mu',title=label)

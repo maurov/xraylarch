@@ -2,35 +2,70 @@
 
 import sys
 import wx
-try:
-    from wx._core import PyDeadObjectError
-except:
-    PyDeadObjectError = Exception
+from  wx.lib.dialogs import ScrolledMessageDialog
 
 import time
 import os
+import locale
 
 from ..larchlib import ensuremod
 from .larchfilling import Filling
-
+from ..utils import get_cwd, format_exception
 
 DEF_CHOICES = [('All Files', '*.*')]
 
-def SafeWxCall(fcn):
-    """decorator to wrap function in a wx.CallAfter() so that
-    calls can be made in a separate thread, and asynchronously.
-    """
-    def wrapper(*args, **kwargs):
-        "callafter wrapper"
-        try:
-            wx.CallAfter(fcn, *args, **kwargs)
-        except PyDeadObjectError:
-            pass
-    wrapper.__doc__ = fcn.__doc__
-    wrapper.__name__ = fcn.__name__
-    wrapper.__dict__.update(fcn.__dict__)
-    return wrapper
+# def ExceptionPopup(parent, title, lines, with_traceback=True,
+#                    style=None, **kws):
+#     """Modal message dialog with current Python Exception"""
+#     if style is None:
+#         style = wx.OK|wx.ICON_INFORMATION
+#     lines.extend(format_exception(with_traceback=with_traceback))
+#     message = '\n'.join(lines)
+#
+#     dkws = {'size': (700, 350)}
+#     dkws.update(kws)
+#     dlg = ScrolledMessageDialog(parent, message, title, **dkws)
+#     dlg.ShowModal()
+#     dlg.Destroy()
 
+class LarchWxApp(wx.App, wx.lib.mixins.inspection.InspectionMixin):
+    """wrapper for wx apps, with the following arguments and features:
+
+    _larch (None or Interpreter):   instance of Larch Interpreter [None]
+    version_info (None or string):  larch version to check for updates [None]
+    with_inspect (bool):            use wx inspection tool for debugging [False]
+    with_c_locale (bool):           whether to force C locale [True]
+
+    """
+    def __init__(self, _larch=None, version_info=None, with_inspect=False,
+                 with_c_locale=True, **kws):
+        self._larch = _larch
+        self.version_info = version_info
+        self.with_inspect = with_inspect
+        self.with_c_locale = with_c_locale
+        wx.App.__init__(self, **kws)
+
+    def OnInit(self):
+        self.createApp()
+        if self.with_inspect:
+            self.ShowInspectionTool()
+        return True
+
+    def createApp(self):
+        return True
+
+    def InitLocale(self):
+        """over-ride wxPython default initial locale"""
+        if self.with_c_locale:
+            self._initial_locale = None
+            locale.setlocale(locale.LC_ALL, 'C')
+        else:
+            lang, enc = locale.getdefaultlocale()
+            self._initial_locale = wx.Locale(lang, lang[:2], lang)
+            locale.setlocale(locale.LC_ALL, lang)
+
+    def run(self):
+        self.MainLoop()
 
 def wx_update(_larch=None, **kws):
     """force an update of wxPython windows"""
@@ -73,21 +108,20 @@ class wxLarchTimer(wx.MiniFrame):
        time.sleep(0.001)
        print(" ..")
 
-# @SafeWxCall
-def gcd(wxparent=None, _larch=None, **kws):
-    """Directory Browser to Change Directory"""
-    parent = _larch.symtable.get_symbol('_sys.wx.wxapp')
-    if parent is None:
-        _larch.raise_exception(None, msg='wx not supported')
-
-    dlg = wx.DirDialog(None, 'Choose Directory',
-                       defaultPath = os.getcwd(),
-                       style = wx.DD_DEFAULT_STYLE)
-
-    if dlg.ShowModal() == wx.ID_OK:
-        os.chdir(dlg.GetPath())
-    dlg.Destroy()
-    return os.getcwd()
+# def gcd(wxparent=None, _larch=None, **kws):
+#     """Directory Browser to Change Directory"""
+#     parent = _larch.symtable.get_symbol('_sys.wx.wxapp')
+#     if parent is None:
+#         _larch.raise_exception(None, msg='wx not supported')
+#
+#     dlg = wx.DirDialog(None, 'Choose Directory',
+#                        defaultPath = get_cwd(),
+#                        style = wx.DD_DEFAULT_STYLE)
+#
+#     if dlg.ShowModal() == wx.ID_OK:
+#         os.chdir(dlg.GetPath())
+#     dlg.Destroy()
+#     return get_cwd()
 
 
 class DataBrowserFrame(wx.Frame):
@@ -124,7 +158,6 @@ def databrowser(_larch=None, **kws):
     return DataBrowserFrame(parent=parent, _larch=_larch)
 
 
-# @SafeWxCall
 def fileprompt(mode='open', multi=True, message = None,
                 fname=None, choices=None, _larch=None, **kws):
     """show File Browser for opening or saving file.
@@ -182,7 +215,7 @@ def fileprompt(mode='open', multi=True, message = None,
         parent = parent.GetTopWindow()
     timer = wxLarchTimer(parent, _larch)
     dlg = wx.FileDialog(parent=timer, message=message,
-                        defaultDir=os.getcwd(),
+                        defaultDir=get_cwd(),
                         defaultFile=fname,
                         wildcard =wildcard,
                         style=style)

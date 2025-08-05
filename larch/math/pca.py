@@ -5,9 +5,9 @@ linear combination fitting
 import os
 import sys
 import time
-
+import json
 from itertools import combinations
-from collections import OrderedDict
+from gzip import GzipFile
 
 import numpy as np
 from numpy.random import randint
@@ -18,11 +18,11 @@ try:
 except ImportError:
     HAS_SKLEARN = False
 
+from lmfit import minimize, Parameters
 
 from .. import Group
 from .utils import interp, index_of
-
-from lmfit import minimize, Parameters
+from larch.utils import str2bytes, bytes2str, read_textfile, unixpath
 
 from .lincombo_fitting import get_arrays, get_label, groups2matrix
 
@@ -159,10 +159,31 @@ def pca_train(groups, arrayname='norm', xmin=-np.inf, xmax=np.inf):
         ind.append(indval)
     ind = np.array(ind)
 
-    nsig = np.argmin(ind)
+    nsig = int(np.argmin(ind))
     return Group(x=xdat, arrayname=arrayname, labels=labels, ydat=ydat,
                  xmin=xmin, xmax=xmax, mean=ymean, components=eigvec,
                  eigenvalues=eigval, variances=variances, ind=ind, nsig=nsig)
+
+
+def save_pca_model(pca_model, filename):
+    """save a PCA model to a file"""
+    from larch.utils.jsonutils import encode4js
+    buff = ['##Larch PCA Model: 1.0 : %s' % time.strftime('%Y-%m-%d %H:%M:%S')]
+    buff.append('%s' % json.dumps(encode4js(pca_model)))
+
+    fh = GzipFile(unixpath(filename), "w")
+    fh.write(str2bytes("\n".join(buff)))
+    fh.close()
+
+def read_pca_model(filename):
+    """read a PCA model from a file"""
+    from larch.utils.jsonutils import decode4js
+    text = read_textfile(filename)
+    lines = text.split('\n')
+    if not lines[0].startswith('##Larch PCA Model'):
+        raise ValueError(f"Invalid Larch PCA Model: '{fname:s}'")
+    return decode4js(json.loads(lines[1]))
+
 
 def pca_statistics(pca_model):
     """return PCA arrays of statistics IND and F
@@ -224,10 +245,16 @@ def pca_fit(group, pca_model, ncomps=None, rescale=True):
 
     """
     # get first nerate arrays and interpolate components onto the unknown x array
-    xdat, ydat = get_arrays(group, pca_model.arrayname)
+    xdat, ydat = groups2matrix([group], pca_model.arrayname, xmin=pca_model.xmin, xmax=pca_model.xmax)
+
     if xdat is None or ydat is None:
         raise ValueError("cannot get arrays for arrayname='%s'" % arrayname)
 
+    xshape = xdat.shape
+    if len(xshape) == 2:
+        xdat = xdat[0]
+
+    ydat = ydat[0]
     ydat = interp(xdat, ydat, pca_model.x, kind='cubic')
 
     params = Parameters()

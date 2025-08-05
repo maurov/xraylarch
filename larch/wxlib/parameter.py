@@ -12,8 +12,9 @@ import wx
 from wx.lib.embeddedimage import PyEmbeddedImage
 
 from wxutils import (GridPanel, Choice, FloatCtrl,
-                     LEFT, pack, HLine, SetTip)
-
+                     LEFT, pack, HLine, SetTip, Font)
+from .wxcolors import GUI_COLORS
+from . import FONTSIZE
 from lmfit import Parameter
 from larch import Group
 from larch.larchlib import Empty
@@ -21,8 +22,9 @@ from larch.larchlib import Empty
 PAR_FIX = 'fix'
 PAR_VAR = 'vary'
 PAR_CON = 'constrain'
+PAR_SKIP = 'skip'
 VARY_CHOICES = (PAR_VAR, PAR_FIX, PAR_CON)
-
+VARY_CHOICES_SKIP = (PAR_VAR, PAR_FIX, PAR_SKIP, PAR_CON)
 
 BOUNDS_custom = 'custom'
 BOUNDS_none   = 'unbound'
@@ -58,43 +60,54 @@ class ParameterWidgets(object):
     wid   = ParameterPanel(parent_wid, param)
     """
     def __init__(self, parent, param,  name_size=None, prefix=None,
-                 expr_size=120, stderr_size=120, float_size=80,
-                 minmax_size=60, widgets=PAR_WIDS):
+                 expr_size=150, stderr_size=120, float_size=85,
+                 minmax_size=60, with_skip=False, widgets=PAR_WIDS):
 
         self.parent = parent
         self.param = param
+        self.widgets = []
         self._saved_expr = ''
         if (prefix is not None and
             not self.param.name.startswith(prefix)):
             self.param.name = "%s%s" %(prefix, self.param.name)
 
+        self.skip = False
         for attr in PAR_WIDS:
             setattr(self, attr, None)
 
         # set vary_choice from param attributes
         vary_choice = PAR_VAR
+        value = None
         if param.expr not in (None, 'None', ''):
             vary_choice = PAR_CON
-        elif not param.vary:
-            vary_choice = PAR_FIX
+            try:
+                value = param.value
+            except:
+                value = -np.Inf
+
+        else:
+            value = param.value
+            vary_choice = PAR_VAR if param.vary else PAR_FIX
 
         if 'name' in widgets:
             name = param.name
             if name in (None, 'None', ''):
                 name = ''
             if name_size is None:
-                name_size = min(50, len(param.name)*10)
+                name_size = min(50, len(param.name)*10) + 10
             self.name = wx.StaticText(parent, label=name,
                                       size=(name_size, -1))
-
+            self.widgets.append(self.name)
         if 'value' in widgets:
-            self.value = FloatCtrl(parent, value=param.value,
+            self.value = FloatCtrl(parent, value=value,
                                    minval=param.min,
                                    maxval=param.max,
                                    action=self.onValue,
                                    act_on_losefocus=True,
+                                   bell_on_invalid=False,
                                    gformat=True,
                                    size=(float_size, -1))
+            self.widgets.append(self.value)
 
         if 'minval' in widgets:
             minval = param.min
@@ -105,6 +118,7 @@ class ParameterWidgets(object):
                                     size=(minmax_size, -1),
                                     act_on_losefocus=True,
                                     action=self.onMinval)
+            self.widgets.append(self.minval)
             self.minval.Enable(vary_choice==PAR_VAR)
 
         if 'maxval' in widgets:
@@ -116,12 +130,15 @@ class ParameterWidgets(object):
                                     size=(minmax_size, -1),
                                     act_on_losefocus=True,
                                     action=self.onMaxval)
+            self.widgets.append(self.maxval)
             self.maxval.Enable(vary_choice==PAR_VAR)
 
         if 'vary' in widgets:
-            self.vary = Choice(parent, size=(90, -1),
-                               choices=VARY_CHOICES,
+            vchoices = VARY_CHOICES_SKIP if with_skip else VARY_CHOICES
+            self.vary = Choice(parent, size=(100, -1),
+                               choices=vchoices,
                                action=self.onVaryChoice)
+            self.widgets.append(self.vary)
             self.vary.SetStringSelection(vary_choice)
 
         if 'expr' in widgets:
@@ -130,11 +147,25 @@ class ParameterWidgets(object):
                 expr = ''
             self._saved_expr = expr
             self.expr = wx.TextCtrl(parent, -1, value=expr,
-                                      size=(expr_size, -1))
+                                    size=(expr_size, -1),
+                                    style=wx.TE_PROCESS_ENTER)
+            self.widgets.append(self.expr)
             self.expr.Enable(vary_choice==PAR_CON)
-            self.expr.Bind(wx.EVT_CHAR, self.onExprChar)
-            self.expr.Bind(wx.EVT_KILL_FOCUS, self.onExprKillFocus)
+            self.expr.Bind(wx.EVT_TEXT_ENTER, self.onExpr)
+            self.expr.Bind(wx.EVT_KILL_FOCUS, self.onExpr)
             SetTip(self.expr, 'Enter constraint expression')
+
+            if param.expr not in (None, 'None', ''):
+                try:
+                    ast.parse(param.expr)
+                    fgcol = GUI_COLORS.text
+                    bgcol = GUI_COLORS.text_bg
+                except SyntaxError:
+                    fgcol = GUI_COLORS.text_invalid
+                    bgcol = GUI_COLORS.text_invalid_bg
+                self.expr.SetForegroundColour(fgcol)
+                self.expr.SetBackgroundColour(bgcol)
+
 
         if 'stderr' in widgets:
             stderr = param.stderr
@@ -142,6 +173,7 @@ class ParameterWidgets(object):
                 stderr = ''
             self.stderr = wx.StaticText(parent, label=stderr,
                                         size=(stderr_size, -1))
+            self.widgets.append(self.expr)
 
         if 'minval' in widgets or 'maxval' in widgets:
             minval = param.min
@@ -154,13 +186,18 @@ class ParameterWidgets(object):
             elif maxval == 0:
                 bounds_choice = BOUNDS_neg
 
-            self.bounds = Choice(parent, size=(90, -1),
+            self.bounds = Choice(parent, size=(110, -1),
                                  choices=BOUNDS_CHOICES,
                                  action=self.onBOUNDSChoice)
+            self.widgets.append(self.bounds)
+
+            for w in self.widgets:
+                w.SetFont(Font(FONTSIZE))
+
             self.bounds.SetStringSelection(bounds_choice)
 
     def onBOUNDSChoice(self, evt=None):
-        bounds = str(evt.GetString().lower())
+        bounds = str(self.bounds.GetStringSelection().lower())
         if bounds == BOUNDS_custom:
             pass
         elif bounds == BOUNDS_none:
@@ -180,29 +217,22 @@ class ParameterWidgets(object):
         if value is not None:
             self.param.value = value
 
-    def onExprChar(self, evt=None):
-        key = evt.GetKeyCode()
-        if key == wx.WXK_RETURN:
-            self.onExpr(value=self.expr.GetValue())
-        evt.Skip()
-
-    def onExprKillFocus(self, evt=None):
-        self.onExpr(value=self.expr.GetValue())
-        evt.Skip()
-
     def onExpr(self, evt=None, value=None):
-        if value is None and evt is not None:
-            value = evt.GetString()
+        if value is None:
+            value = self.expr.GetValue()
+            # if hasattr(evt, 'GetString'):
+            #     value = evt.GetString()
         try:
             ast.parse(value)
             self.param.expr = value
-            bgcol, fgcol = 'white', 'black'
+            fgcol = GUI_COLORS.text
+            bgcol = GUI_COLORS.text_bg
         except SyntaxError:
-            bgcol, fgcol = 'red', 'yellow'
+            fgcol = GUI_COLORS.text_invalid
+            bgcol = GUI_COLORS.text_invalid_bg
 
         self.expr.SetForegroundColour(fgcol)
         self.expr.SetBackgroundColour(bgcol)
-
 
     def onMinval(self, evt=None, value=None):
         if value in (None, 'None', ''):
@@ -222,7 +252,6 @@ class ParameterWidgets(object):
                 self.bounds.SetStringSelection(BOUNDS_custom)
 
     def onMaxval(self, evt=None, value=None):
-        # print "onMaxval " , value, self.value, self.value
         if value in (None, 'None', ''):
             value = np.inf
         if self.value is not None:
@@ -244,7 +273,10 @@ class ParameterWidgets(object):
     def onVaryChoice(self, evt=None):
         if self.vary is None:
             return
-        vary = str(evt.GetString().lower())
+
+        vary = str(self.vary.GetStringSelection().lower())
+        self.skip = (vary == PAR_SKIP)
+
         self.param.vary = (vary==PAR_VAR)
         if ((vary == PAR_VAR or vary == PAR_FIX) and
             self.param.expr not in (None, 'None', '')):
@@ -254,20 +286,21 @@ class ParameterWidgets(object):
             self.param.expr = self._saved_expr
 
         if self.value is not None:
-            self.value.Enable(vary!=PAR_CON)
+            self.value.Enable(vary not in (PAR_CON, PAR_SKIP))
         if self.expr is not None:
             self.expr.Enable(vary==PAR_CON)
         if self.minval is not None:
-            self.minval.Enable(vary==PAR_VAR)
+            self.minval.Enable(vary not in (PAR_FIX, PAR_SKIP))
         if self.maxval is not None:
-            self.maxval.Enable(vary==PAR_VAR)
+            self.maxval.Enable(vary not in (PAR_FIX, PAR_SKIP))
         if self.bounds is not None:
-            self.bounds.Enable(vary==PAR_VAR)
+            self.bounds.Enable(vary not in (PAR_FIX, PAR_SKIP))
 
 
 class ParameterDialog(wx.Dialog):
     """Dialog (modal, that is, block) for Parameter Configuration"""
-    def __init__(self, parent, param, precision=4, vary=None, **kws):
+    def __init__(self, parent, param, precision=4, vary=None,
+                 with_skip=False, **kws):
         self.param = param
         title = "  Parameter:  %s  " % (param.name)
         wx.Dialog.__init__(self, parent, wx.ID_ANY, title=title)
@@ -291,12 +324,14 @@ class ParameterDialog(wx.Dialog):
         if expr is None:   expr = ''
 
         self.wids = Empty()
-        self.wids.vary = Choice(panel, choices=VARY_CHOICES,
+        vchoices = VARY_CHOICES_SKIP if with_skip else VARY_CHOICES
+        self.wids.vary = Choice(panel, choices=vchoices,
                                 action=self.onVaryChoice, size=(110, -1))
         self.wids.vary.SetSelection(vary)
 
         self.wids.val  = FloatCtrl(panel, value=param.value, size=(100, -1),
                                    precision=precision,
+                                   bell_on_invalid=False,
                                    minval=minval, maxval=maxval)
         self.wids.min  = FloatCtrl(panel, value=minval, size=(100, -1))
         self.wids.max  = FloatCtrl(panel, value=maxval, size=(100, -1))
@@ -339,10 +374,8 @@ class ParameterDialog(wx.Dialog):
         self.SetSize((bsize[0]+10, bsize[1]+10))
 
     def onVaryChoice(self, evt=None):
-        if evt is not None:
-            vary = evt.GetString()
-        else:
-            vary = self.wids.vary.GetStringSelection()
+
+        vary = self.wids.vary.GetStringSelection()
         if vary == PAR_CON:
             self.wids.val.Disable()
             self.wids.expr.Enable()
@@ -357,7 +390,8 @@ class ParameterPanel(wx.Panel):
     param = Parameter(value=11.22, vary=True, min=0, name='x1')
     wid   = ParameterPanel(parent_wid, param)
     """
-    def __init__(self, parent, param, size=(80, -1), show_name=False, precision=4, **kws):
+    def __init__(self, parent, param, size=(80, -1), show_name=False,
+                 precision=4, with_skip=False, **kws):
         self.param = param
         self.precision = precision
         wx.Panel.__init__(self, parent, -1)
@@ -365,6 +399,7 @@ class ParameterPanel(wx.Panel):
 
         self.wids.val = FloatCtrl(self, value=param.value,
                                   minval=param.min, maxval=param.max,
+                                  bell_on_invalid=False,
                                   precision=precision, size=size)
 
         self.wids.name = None
@@ -372,7 +407,8 @@ class ParameterPanel(wx.Panel):
         self.wids.edit.Bind(wx.EVT_BUTTON, self.onConfigure)
         SetTip(self.wids.edit, "Configure Parameter")
 
-        self.wids.vary = Choice(self, choices=VARY_CHOICES,
+        vchoices = VARY_CHOICES_SKIP if with_skip else VARY_CHOICES
+        self.wids.vary = Choice(self, choices=vchoices,
                                 action=self.onVaryChoice, size=(80, -1))
 
         vary_choice = 0
@@ -396,7 +432,7 @@ class ParameterPanel(wx.Panel):
         pack(self, sizer)
 
     def onVaryChoice(self, evt=None):
-        vary = evt.GetString()
+        vary = self.wids.vary.GetStringSelection() # evt.GetString()
         self.param.vary = (vary == PAR_VAR)
         if vary == PAR_CON:
             self.wids.val.Disable()
@@ -463,17 +499,3 @@ class TestFrame(wx.Frame):
 
     def onExit(self, evt=None):
         self.Destroy()
-
-class TestApp(wx.App, wx.lib.mixins.inspection.InspectionMixin):
-    def __init__(self, **kws):
-        wx.App.__init__(self)
-
-    def OnInit(self):
-        self.Init()
-        frame = TestFrame()
-        frame.Show()
-        self.SetTopWindow(frame)
-        return True
-
-if __name__ == "__main__":
-    TestApp().MainLoop()

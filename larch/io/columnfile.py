@@ -6,19 +6,84 @@ import os
 import sys
 import time
 import string
+from pathlib import Path
+from collections import namedtuple
 import numpy as np
 from dateutil.parser import parse as dateparse
 from math import log10
+from pyshortcuts import gformat, fix_varname
+
 from larch import Group
 from larch.symboltable import isgroup
-from .fileutils import fix_varname
-
+from ..utils import read_textfile, format_exception
 from .xafs_beamlines import guess_beamline
 
-MODNAME = '_io'
+nanresult = namedtuple('NanResult', ('file_ok', 'message', 'nan_rows',
+                                     'nan_cols', 'inf_rows', 'inf_cols'))
+
 TINY = 1.e-7
-MAX_FILESIZE = 100*1024*1024  # 100 Mb limit
+MAX_FILESIZE = 2**28  # 256 MB limit
 COMMENTCHARS = '#;%*!$'
+
+def look_for_nans(path):
+    """
+    look for Nans and Infs in an ASCII data file
+
+    Arguments:
+         path (string):  full path to ASCII column file
+
+    Returns:
+       NanResult, named tuple with elements
+
+        'file_ok' : bool, whether data is read and contains no Nans or Infs
+        'message' : exception message if file cannot be read at all or
+                   'has nans', 'has infs' or 'has nans and infs'
+        `nan_rows`: list of rows containing Nans
+        `nan_cols`: list of columns containing Nans
+        `inf_rows`: list of rows containing Infs
+        `inf_cols`: list of columns containing Infs
+    """
+
+    nan_rows, nan_cols, inf_rows, inf_cols = [], [], [], []
+    try:
+        dat = read_ascii(path)
+    except:
+        print(''.join(format_exception()))
+        return nanresult(False, f'could not read file {path}',
+                             nan_rows, nan_cols, inf_rows, inf_cols)
+    if len(dat.data) < 1:
+        return nanresult(False, f'no data in file {path}',
+                             nan_rows, nan_cols, inf_rows, inf_cols)
+    if np.all(np.isfinite(dat.data)):
+        return nanresult(True, 'file ok',
+                             nan_rows, nan_cols, inf_rows, inf_cols)
+
+    msg = 'unknown'
+    nanvals = np.where(np.isnan(dat.data))
+    if len(nanvals[0]) > 0:
+        msg = 'has nans'
+        for icol in nanvals[0]:
+            if icol not in nan_cols:
+                nan_cols.append(icol)
+        for irow in nanvals[1]:
+            if irow not in nan_rows:
+                nan_rows.append(irow)
+
+    infvals = np.where(np.isinf(dat.data))
+    if len(infvals[0]) > 0:
+        if len(msg) == 0:
+            msg = 'has infs'
+        else:
+            msg = 'has nans and infs'
+        for icol in infvals[0]:
+            if icol not in inf_cols:
+                inf_cols.append(icol)
+        for irow in infvals[1]:
+            if irow not in inf_rows:
+                inf_rows.append(irow)
+
+    return nanresult(False, msg, nan_rows, nan_cols, inf_rows, inf_cols)
+
 
 def getfloats(txt, allow_times=True):
     """convert a line of numbers into a list of floats,
@@ -26,80 +91,44 @@ def getfloats(txt, allow_times=True):
 
     Arguments
     ---------
-      txt           str, line of text to parse
-      allow_times   bool, whether to support time stamps [True]
+      txt   (str) : line of text to parse
+      allow_times  (bool): whether to support time stamps [True]
 
     Returns
     -------
-      list, each entry either a float or None
+      list with each entry either a float or None
 
     Notes
     -----
       The `allow_times` will try to support common date-time strings
       using the dateutil module, returning a numerical value as the
       Unix timestamp, using
-          time.mktime(dateutil.parser.parse(word).timetuple())
+          dateutil.parser.parse(word).timestamp()
     """
-    words = [w.strip() for w in txt.replace(',', ' ').split()]
-    mktime = time.mktime
+    t = txt[:].strip()
+    if t[0] in ('#', ';', '!', '<', '*', '%'):
+        return [None]
+
+    for delim in ('\t', ',', ';'):
+        if t.count(delim) > 0:
+            t = t.replace(delim, ' ')
+    words = [w.strip() for w in t.split()]
     for i, w in enumerate(words):
         val = None
         try:
             val = float(w)
         except ValueError:
-            try:
-                val = mktime(dateparse(w).timetuple())
-            except ValueError:
-                pass
+            if allow_times:
+                try:
+                    val = dateparse(w).timestamp()
+                except ValueError:
+                    pass
         words[i] = val
     return words
 
 def colname(txt):
-    return fix_varname(txt.strip().lower()).replace('.', '_')
+    return fix_varname(txt.strip()).replace('.', '_')
 
-
-def lformat(val, length=12):
-    """Format a number with fixed-length format, somewhat like '%g' except that
-
-        a) the length of the output string will be the requested length.
-        b) positive numbers will have a leading blank.
-        b) the precision will be as high as possible.
-        c) trailing zeros will not be trimmed.
-
-    The precision will typically be length-7, but may be better than
-    that for values with absolute value between 1.e-5 and 1.e8.
-
-    Arguments
-    ---------
-    val       value to be formatted
-    length    length of output string
-
-    Returns
-    -------
-    string of specified length.
-
-    Notes
-    ------
-     Positive values will have leading blank.
-
-    """
-    try:
-        expon = int(log10(abs(val)))
-    except (OverflowError, ValueError):
-        expon = 0
-    length = max(length, 7)
-    form = 'e'
-    prec = length - 7
-    if abs(expon) > 99:
-        prec -= 1
-    elif ((expon > 0 and expon < (prec+4)) or
-          (expon <= 0 and -expon < (prec-1))):
-        form = 'f'
-        prec += 4
-        if expon > 0:
-            prec -= expon
-    fmt = '{0: %i.%i%s}' % (length, prec, form)
-    return fmt.format(val)
 
 def parse_labelline(labelline, header):
     """
@@ -108,38 +137,137 @@ def parse_labelline(labelline, header):
 
     This is meant to handle some special cases of XAFS data collected at a variety of sources
     """
-
     pass
 
 
-def read_ascii(filename, labels=None, simple_labels=False,
-               sort=False, sort_column=0, delimeter=None):
-    """read a column ascii column file, returning a group containing the data
-    extracted from the file.
-
-    read_ascii(filename, labels=None, simple_labels=False, sort=False, sort_column=0)
+def sum_fluor_channels(dgroup, roi, icr=None, ocr=None, ltime=None, label=None,
+                       add_data=True, **kws):
+    """build summed, deadtime-corrected fluorescence spectrum for a Group
 
     Arguments
     ---------
-     filename (str)        name of file to read
-     labels (list or None) list of labels to use for array labels [None]
-     simple_labels (bool)  whether to force simple column labels (note 1) [False]
-     delimeter (str)       string to use to split label line
-     sort (bool)           whether to sort row data (note 2) [False]
-     sort_column (int)     column to use for sorting (note 2) [0]
+    dgroup    data group
+    roi       list in array indices for ROI
+    icr       None or list of array indices for ICR   [None]
+    ocr       None or list of array indices for OCR   [None]
+    ltime     None or list of array indices for LTIME [None]
+    label     None or label for the summed, corrected array [None]
+    add_data  bool, whether to add label and data to datgroup [False]
 
     Returns
-    --------
-      group containing data read from file
+    -------
+    label, ndarray   with summed, deadtime-corrected data
+
+    if add_data is True, the ndarray will also be appended to `dgroup.data,
+    and the label will be appended to dgroup.array_labels
+
 
     Notes
-    -----
-      1. array labels.  If `labels` is `None` (he default value), column labels
-         (and so, names of 1d arrays) will be tried to be determined from the
-         file header.  This often means parsing the final header line, but
-         tagged column files from several XAFS beamlines will be tried and used
-         if matching.  Column labels may be like 'col1', 'col2', etc if suitable
-         column labels cannot be guessed.
+    ------
+    1.  The output array will be  Sum[ roi*icr/(ocr*ltime) ]
+    2.  The default label will be like the array label for the 'dtcN' + first ROI
+    3.  icr, ocr, or ltime can be `None`, '1.0', '-1', or '1' to mean '1.0' or
+        arrays of indices for the respective components: must be the same lenght as roi
+
+    4.  an array index of -1 will indicate 'bad channel' and be skipped for ROI
+        or set to 1.0 for icr, ocr, or ltime
+
+    5. if the list of arrays in roi, icr, ocr, or ltime are otherwise out-of-range,
+       the returned (label, data) will be (None, None)
+
+    """
+    nchans = len(roi)
+    if icr in ('1.0', -1, 1, None):
+        icr = [-1]*nchans
+    if ocr in ('1.0', -1, 1, None):
+        ocr = [-1]*nchans
+    if ltime in ('1.0', -1, 1, None):
+        ltime = [-1]*nchans
+    if len(ltime) != nchans or len(icr) != nchans or len(ocr) != nchans:
+        raise Value("arrays of indices for for roi, icr, ocr, and ltime must be the same length")
+
+    narr, npts = dgroup.data.shape
+    nused = 0
+    sum = 0.0
+    olabel = None
+    def get_data(arr, idx):
+        iarr = arr[idx]
+        if iarr < 0:
+            return iarr, 1.0
+        if iarr > narr-1:
+            return None, None
+        return iarr, dgroup.data[iarr, :]
+
+    for pchan in range(nchans):
+        droi = dicr = docr = dltime = 1.0
+        iarr, droi = get_data(roi, pchan)
+        if isinstance(droi, np.ndarray):
+            if olabel is None:
+                olabel = dgroup.array_labels[iarr]
+        elif iarr is None:
+            return (None, None)
+        else:  # index of -1 here means "skip"
+            continue
+
+        iarr, dicr = get_data(icr, pchan)
+        if iarr is None: return (None, None)
+
+        iarr, docr = get_data(ocr, pchan)
+        if iarr is None:  return (None, None)
+
+        iarr, docr = get_data(ocr, pchan)
+        if iarr is None:  return (None, None)
+
+        iarr, dltime= get_data(ltime, pchan)
+        if iarr is None:  return (None, None)
+
+        sum += droi*dicr/(docr*dltime)
+        nused += 1
+
+    if label is None:
+        if olabel is None: olabel = 'ROI'
+        label = olabel = f'dtc{nused}_{olabel}'
+        n  = 1
+        while label in dgroup.array_labels:
+            n += 1
+            label = f'{olabel}_{n}'
+    if add_data:
+        dgroup.array_labels.append(label)
+        dgroup.data = np.append(dgroup.data, sum.reshape(1, len(sum)), axis=0)
+    return (label, sum)
+
+
+
+def read_ascii(filename, labels=None, simple_labels=False,
+               sort=False, sort_column=0):
+    """read a column ascii column file, returning a group
+    containing the data extracted from the file.
+
+    Arguments:
+      filename (str):        name of file to read
+      labels (ist or None) : list of labels to use for array labels [None]
+      simple_labels (bool) : whether to force simple column labels (note 1) [False]
+      sort (bool) :          whether to sort row data (note 2) [False]
+      sort_column (int) :    column to use for sorting (note 2) [0]
+
+    Returns:
+      Group
+
+      A data group containing data read from file, with several attributes:
+
+         | filename     : text name of the file.
+         | array_labels : array labels, names of 1-D arrays.
+         | data         : 2-dimensional data (ncolumns, nrows) with all data.
+         | header       : array of text lines of the header.
+         | footer       : array of text lines of the footer (text after the numerical data)
+         | attrs        : group of attributes parsed from header lines.
+
+    Notes:
+      1. array labels.  If `labels` is `None` (the default), column labels
+         and names of 1d arrays will be guessed from the file header.  This often
+         means parsing the final header line, but tagged column files from several XAFS
+         beamlines will be tried and used if matching.  Column labels may be like 'col1',
+         'col2', etc if suitable column labels cannot be guessed.
          These labels will be used as names for the 1-d arrays from each column.
          If `simple_labels` is  `True`, the names 'col1', 'col2' etc will be used
          regardless of the column labels found in the file.
@@ -148,37 +276,45 @@ def read_ascii(filename, labels=None, simple_labels=False,
          by giving the column index (starting from 0).
 
       3. header parsing. If header lines are of the forms of
-            KEY : VAL
-            KEY = VAL
+
+           | KEY : VAL
+           | KEY = VAL
+
          these will be parsed into a 'attrs' dictionary in the returned group.
 
+    Examples:
 
-    The returned group will have a number of members:
+        >>> feo_data = read_ascii('feo_rt1.dat')
+        >>> show(g)
+        == Group ascii_file feo_rt1.dat: 0 methods, 8 attributes ==
+        array_labels: ['energy', 'xmu', 'i0']
+        attrs: <Group header attributes from feo_rt1.dat>
+        data: array<shape=(3, 412), type=dtype('float64')>
+        energy: array<shape=(412,), type=dtype('float64')>
+        filename: 'feo_rt1.dat'
+        header: ['# room temperature FeO', '# data from 20-BM, 2001, as part of NXS school', ... ]
+        i0: array<shape=(412,), type=dtype('float64')>
+        xmu: array<shape=(412,), type=dtype('float64')>
 
-       GROUP.filename: text name of the file
-       GROUP.array_labels: array labels, names of 1-D arrays
-       GROUP.data:     2-dimensional data (ncolumns, nrows)
-       GROUP.header:   array of text lines of the header.
-       GROUP.footer:   array of text lines of the footer (text after the block of numerical data)
-       GROUP.attrs :   group of attributes parsed from header lines
+    See Also:
+        read_xdi, write_ascii
+
     """
-    if not os.path.isfile(filename):
+    if not Path(filename).is_file():
         raise OSError("File not found: '%s'" % filename)
     if os.stat(filename).st_size > MAX_FILESIZE:
         raise OSError("File '%s' too big for read_ascii()" % filename)
 
-    with open(filename, 'r') as fh:
-        text = fh.read()
-
-    text = text.replace('\r\n', '\n').replace('\r', '\n').split('\n')
+    text = read_textfile(filename)
+    lines = text.split('\n')
 
     ncol = None
     data, footers, headers = [], [], []
 
-    text.reverse()
+    lines.reverse()
     section = 'FOOTER'
 
-    for line in text:
+    for line in lines:
         line = line.strip()
         if len(line) < 1:
             continue
@@ -232,16 +368,21 @@ def read_ascii(filename, labels=None, simple_labels=False,
             if len(words) > 1:
                 header_attrs[key] = words[1].strip()
 
+
+    fpath = Path(filename).absolute()
+    filename = fpath.as_posix()
+    attrs = {'filename': filename}
+    group = Group(name='ascii_file %s' % filename,
+                  path=filename, filename=fpath.name,
+                  header=headers, data=[], array_labels=[])
+
+    if len(data) == 0:
+        return group
+
     if sort and sort_column >= 0 and sort_column < ncol:
          data = data[:, np.argsort(data[sort_column])]
 
-    path, fname = os.path.split(filename)
-    attrs = {'filename': filename}
-    group = Group(name='ascii_file %s' % filename,
-                  path=filename,
-                  filename=fname,
-                  header=headers,
-                  data=data)
+    group.data = data
 
     if len(footers) > 0:
         group.footer = footers
@@ -257,6 +398,7 @@ def read_ascii(filename, labels=None, simple_labels=False,
     if labels is None and not simple_labels:
         bldat = guess_beamline(headers)(headers)
         labels = bldat.get_array_labels()
+
         if getattr(bldat, 'energy_units', 'eV') != 'eV':
             group.energy_units = bldat.energy_units
         if getattr(bldat, 'energy_column', 1) != 1:
@@ -268,7 +410,7 @@ def read_ascii(filename, labels=None, simple_labels=False,
     return group
 
 def set_array_labels(group, labels=None, simple_labels=False,
-                     save_oldarrays=False, _larch=None):
+                     save_oldarrays=False):
 
     """set array names for a group from its 2D `data` array.
 
@@ -300,8 +442,6 @@ def set_array_labels(group, labels=None, simple_labels=False,
 
     """
     write = sys.stdout.write
-    if _larch is not None:
-        write = _larch.writer.write
     if not hasattr(group, 'data'):
         write("cannot set array labels for group '%s': no `data`\n" % repr(group))
         return
@@ -320,7 +460,7 @@ def set_array_labels(group, labels=None, simple_labels=False,
     # generating array `tlabels` for test labels
     #
     # generate simple column labels, used as backup
-    clabels = ['col%i' % (i+1) for i in range(ncols)]
+    clabels = [f'col{(i+1)}' for i in range(ncols)]
 
     if isinstance(labels, str):
         labels = labels.split()
@@ -336,7 +476,7 @@ def set_array_labels(group, labels=None, simple_labels=False,
     # 2.a: check for not enough and too many labels
     if len(tlabels) < ncols:
         for i in range(len(tlabels), ncols):
-            tlabels.append("col%i" % (i+1))
+            tlabels.append(f"col{i+1}")
     elif len(tlabels) > ncols:
         tlabels = tlabels[:ncols]
 
@@ -355,37 +495,40 @@ def set_array_labels(group, labels=None, simple_labels=False,
                 j += 1
                 if j == len(extras):
                     break
-                lname = "%s_%s" % (tlabels[i], extras[j])
+                lname = f"{tlabels[i]}_{extras[j]}"
         if lname in labels:
             lname = clabels[i]
         labels.append(lname)
 
     ####
     # step 3: assign attribue names, set 'array_labels'
-    for i, name in enumerate(labels):
+    labels_lcase = [l.lower() for l in labels]
+    for i, name in enumerate(labels_lcase):
         setattr(group, name, group.data[i])
-    group.array_labels = labels
+    group.array_labels_orig = labels
+    group.array_labels = labels_lcase
     return group
 
 
-def write_ascii(filename, *args, commentchar='#', label=None, header=None,
-                _larch=None, **kws):
-    """write a list of items to an ASCII column file
+def write_ascii(filename, *args, commentchar='#', label=None, header=None):
+    """
+    write a list of items to an ASCII column file
 
-    write_ascii(filename, arg1, arg2, arg3, ... **args)
+    Arguments:
+      args (list of groups):     list of groups to write.
+      commentchar (str) :        character for comment ('#')
+      label (str on None):       array label line (autogenerated)
+      header (list of strings):  array of strings for header
 
-    arguments
-    ---------
-    commentchar: character for comment ('#')
-    label:       array label line (autogenerated)
-    header:      array of strings for header
+    Returns:
+      None
+
+    Examples:
+       >>> write_ascii('myfile',  group.energy, group.norm, header=['comment1', 'comment2']
 
     """
     ARRAY_MINLEN = 2
     write = sys.stdout.write
-    if _larch is not None:
-        write = _larch.writer.write
-
     com = commentchar
     label = label
     if header is None:
@@ -418,37 +561,29 @@ def write_ascii(filename, *args, commentchar='#', label=None, header=None,
         buff.append('%s %s' % (com, s))
     buff.append('%s---------------------------------'% com)
     if label is None:
-        label = (' '*13).join(['col%i' % (i+1) for i in range(len(arrays))])
+        label = (' '*13).join(['col%d' % (i+1) for i in range(len(arrays))])
     buff.append('#  %s' % label)
 
     arrays = np.array(arrays)
     for i in range(arraylen):
-        w = [" %s" % lformat(val[i], length=14) for val in arrays]
+        w = [" %s" % gformat(val[i], length=14) for val in arrays]
         buff.append('  '.join(w))
+    buff.append('')
 
-    try:
-        fout = open(filename, 'w')
-    except:
-        write("cannot open file %s'\n" % filename)
-        return
-
-    try:
+    with open(filename, 'w', encoding=sys.getdefaultencoding()) as fout:
         fout.write('\n'.join(buff))
-        fout.write('\n')
-    except:
-        write("cannot write to file %s'\n" % filename)
-        return
-    write("wrote to file '%s'\n" % filename)
+    sys.stdout.write("wrote to file '%s'\n" % filename)
 
 
 def write_group(filename, group, scalars=None, arrays=None,
-                arrays_like=None, commentchar='#', _larch=None):
-    """write components of a group to an ASCII column file
+                arrays_like=None, commentchar='#'):
+    """(deprecated) write components of a group to an ASCII column file
 
-    write_group(filename, group, commentchar='#')
 
-    Warning: This is pretty minimal and may work poorly
-    for large groups of complex data.
+    Warning:
+       This is pretty minimal and may work poorly for large groups of complex data.
+       Use `save_session` instead.
+
     """
 
     items = dir(group)
@@ -483,30 +618,60 @@ def write_group(filename, group, scalars=None, arrays=None,
             args.append(getattr(group, name))
 
     write_ascii(filename, *args, commentchar=commentchar,
-                label=label, header=header, _larch=_larch)
+                label=label, header=header)
 
 
-def guess_filereader(filename):
-    """guess function name to use to read an ASCII data file based
-    on the file header
+def read_fdmnes(filename, **kwargs):
+    """read [FDMNES](http://fdmnes.neel.cnrs.fr/) ascii files"""
+    shift_energy = kwargs.pop("shift_energy", True)
+    group = read_ascii(filename, **kwargs)
+    group.header_dict = dict(filetype='FDMNES', energy_units='eV')
+    for headline in group.header:
+        if ("E_edge" in headline):
+            if headline.startswith("#"):
+                headline = headline[1:]
+            vals = [float(v) for v in headline.split(" = ")[0].split(" ") if v]
+            vals_names = headline.split(" = ")[1].split(", ")
+            group.header_dict.update(dict(zip(vals_names, vals)))
+    group.name = f'FDMNES file {filename}'
+    if shift_energy:
+        group.energy += group.header_dict["E_edge"]
+    #fix _arrlabel -> arrlabel
+    for ilab, lab in enumerate(group.array_labels):
+        if lab.startswith("_"):
+            fixlab = lab[1:]
+            group.array_labels[ilab] = fixlab
+            delattr(group, lab)
+            setattr(group, fixlab, group.data[ilab])
+    return group
+
+def guess_filereader(path, return_text=False):
+    """guess function name to use to read a data file based on the file header
 
     Arguments
     ---------
-    filename (str)   name of file to be read
+    path (str) : file path to be read
 
     Returns
     -------
-      name of function (as a string) to use to read file
+    name of function (as a string) to use to read file
+    if return_text: text of the read file
     """
-    with open(path, 'r') as fh:
-        line1 = fh.readline()
+    text = read_textfile(path)
+    lines = text.split('\n')
     line1 = lines[0].lower()
-
     reader = 'read_ascii'
+    if 'epics scan' in line1:
+        reader = 'read_gsescan'
     if 'xdi' in line1:
         reader = 'read_xdi'
-        if ('epics stepscan' in line1 or 'gse' in line1):
-            reader = 'read_gsexdi'
-    elif 'epics scan' in line1:
-        reader = 'read_gsescan'
-    return reader
+    if 'epics stepscan file' in line1 :
+        reader = 'read_gsexdi'
+    if ("#s" in line1) or ("#f" in line1):
+        reader = 'read_specfile'
+    if 'fdmnes' in line1:
+        reader = 'read_fdmnes'
+    if return_text:
+        return reader, text
+    else:
+        return reader

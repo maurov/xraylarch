@@ -1,54 +1,169 @@
 #!/usr/bin/env python
-__date__    = '2020-Feb-27'
-__version__ = '0.9.47'
-__authors__ = "M. Newville, M. Koker, B. Ravel, and others"
+"""Version information"""
 
+__release_version__ = '2025.2.2'
+__date__    = '2025-July-29'
+__authors__ = "M. Newville, M. Rovezzi, M. Koker, B. Ravel, and others"
+
+from ._version import __version__, __version_tuple__
 import sys
-import numpy
-import scipy
-import matplotlib
-import lmfit
-from collections import OrderedDict
+from collections import namedtuple
+from packaging.version import parse as ver_parse
 
-def version_data(mods=None):
-    sysvers = sys.version
-    if '\n' in sysvers:
-        sysvers = sysvers.split('\n')[0]
+import importlib
+import urllib3
+from subprocess import check_call
 
-    vdat = OrderedDict()
-    vdat['larch'] = "%s (%s) %s" % (__version__, __date__, __authors__)
-    vdat['python'] = "%s" % (sysvers)
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-    allmods = [numpy, scipy, matplotlib, lmfit]
-    if mods is not None:
-        for m in mods:
-            if m not in allmods:
-                allmods.append(m)
+# libraries whose versions might be interesting to know
+LIBS_VERSIONS = ('numpy', 'scipy', 'matplotlib', 'h5py', 'sklearn', 'skimage',
+                 'sqlalchemy', 'fabio', 'pyFAI', 'PIL', 'imageio', 'silx',
+                 'tomopy', 'pymatgen.core', 'numdifftools', 'xraydb', 'lmfit',
+                 'asteval', 'wx', 'wxmplot')
 
-    for mod in allmods:
-        if mod is not None:
-            mname = mod.__name__
-            try:
-                vers = mod.__version__
-            except:
-                vers = "unavailable"
-            vdat[mname] = vers
+def version_data(with_libraries=False):
+    "get version data"
+    vinf  = sys.version_info
+    pyvers = f'{vinf.major:d}.{vinf.minor:d}.{vinf.micro:d}'
+
+    buildinfo = sys.version
+    if '\n' in buildinfo:
+        buildinfo = buildinfo.split('\n', maxsplit=1)[0].strip()
+    if buildinfo.startswith(pyvers):
+        buildinfo = buildinfo.replace(pyvers, '').strip()
+
+    builder = buildinfo[:40]
+    if '|' in buildinfo:
+        sects = buildinfo.split('|')
+        if len(sects) > 1:
+            builder = sects[1].strip()
+
+    vdat = {'release version': __release_version__,
+            'release date':  __date__,
+            'development version':  __version__,
+            'authors': __authors__,
+            'python version': pyvers,
+            'python builder': builder,
+            'python sysversion': sys.version,
+            }
+
+    if with_libraries:
+        for modname in LIBS_VERSIONS:
+            vers = "not installed"
+            if modname not in sys.modules:
+                try:
+                    importlib.import_module(modname)
+                except:
+                    pass
+            if modname in sys.modules:
+                mod = sys.modules[modname]
+                vers = getattr(mod, '__version__', None)
+                if vers is None:
+                    vers = getattr(mod, 'version',
+                                   'unknown version')
+            vdat[modname] = vers
     return vdat
 
-def make_banner(mods=None):
-    vdat = version_data(mods=mods)
+def make_banner(with_libraries=False, show_libraries=None):
+    "return startup banner"
+    if show_libraries is None:
+        show_libraries = LIBS_VERSIONS if with_libraries else []
 
-    lines = ['Larch %s' % vdat.pop('larch'),
-             'Python %s' % vdat.pop('python')]
+    vdat = version_data(with_libraries=True)
+    lines = [f"Larch {vdat['release version']}, released {vdat['release date']}"]
+    if vdat['development version'] != vdat['release version']:
+        lines.append(f"development version: {vdat['development version']}")
+    lines.append(f"Python {vdat['python version']}, {vdat['python builder']}")
+    libline = []
+    for key, val in vdat.items():
+        if key in show_libraries:
+            libline.append(f"{key:s}: {val}")
+            if len(libline) > 3:
+                lines.append(', '.join(libline))
+                libline = []
+    if len(libline) > 0:
+        lines.append(', '.join(libline))
 
-    reqs = []
-    for name, vstr in vdat.items():
-        reqs.append('%s %s' % (name, vstr))
-    lines.append(', '.join(reqs))
+    if len(show_libraries) < 10:
+        lines.append('use `print(show_version())` for detailed versions')
 
     linelen = max([len(line) for line in lines])
-    border = '='*max(linelen, 75)
+    border = '='*min(99, max(linelen, 25))
     lines.insert(0, border)
     lines.append(border)
-
     return '\n'.join(lines)
+
+def show_version():
+    vdat = version_data(with_libraries=True)
+    out = []
+    for key, val in vdat.items():
+        out.append(f"{key:20s}:  {val}")
+    return '\n'.join(out)
+
+
+########
+## for comparing current with remote version
+########
+VERSION_URL='https://raw.githubusercontent.com/xraypy/xraylarch/gh-pages/version.txt'
+
+VersionStatus = namedtuple('VersionStatus', ('update_available',
+                                             'local_version',
+                                             'remote_version',
+                                             'message'))
+
+UPDATE_MESSAGE = """#=== Update Available ===
+Larch version {remote_version:s} is available. Your version is currently {local_version:s}.
+To update the latest version run
+   larch -u
+from a Command Window or Terminal.
+#========================"""
+
+LATEST_MESSAGE = """Larch version {local_version:s} is up to date."""
+
+def check_larchversion():
+    "check version, return VersionStatus tuple"
+    local_version = __release_version__
+    import requests
+    try:
+        req = requests.get(VERSION_URL, verify=False, timeout=3.10)
+    except:
+        return VersionStatus(False, local_version, 'unknown', 'offline')
+    remote_version = '0.9.001'
+    if req.status_code == 200:
+        try:
+            for line in req.text.split('\n'):
+                line = line.strip()
+                if not line.startswith('#'):
+                    remote_version = line
+                    break
+        except:
+            pass
+    update_available = ver_parse(remote_version) > ver_parse(local_version)
+    message = UPDATE_MESSAGE if update_available else LATEST_MESSAGE
+    message = message.format(remote_version=remote_version,
+                             local_version=local_version)
+    return VersionStatus(update_available,local_version, remote_version, message)
+
+NIGHTLY_URL  = 'https://millenia.cars.aps.anl.gov/xraylarch/downloads/'
+NIGHTLY_WHEEL = 'xraylarch-latest.txt'
+
+def upgrade_nightly_build():
+    "pip install from latest nightly build"
+    import requests
+    try:
+        url = f'{NIGHTLY_URL}/{NIGHTLY_WHEEL}'
+        req = requests.get(f'{NIGHTLY_URL}/{NIGHTLY_WHEEL}', verify=False, timeout=10.0)
+    except:
+        print("could not get nightly build", url)
+        return
+
+    if req.status_code == 200:
+        fname = req.text.split()[0]
+        print("Downloading wheel for nightly build: {fname}")
+        check_call([sys.executable, '-m', 'pip', 'install', f'{NIGHTLY_URL}{fname}'])
+
+def upgrade_from_pypi():
+    "pip installl/upgrade larch from PyPI"
+    target = 'xraylarch[larix]' if with_larix else 'xraylarch'
+    check_call([sys.executable, '-m', 'pip', 'install', '--upgrade', target])

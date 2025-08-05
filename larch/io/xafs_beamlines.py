@@ -29,13 +29,15 @@ By default, that header will defined all the text before the data table.
 """
 
 import numpy as np
-from .fileutils import fix_varname
+from pyshortcuts import fix_varname
 
 def guess_beamline(header=None):
     """
     guess beamline data class used to parse headers from header lines
     """
-    if header is not None and len(header) > 1:
+    if header is None:
+        header = ['']
+    if len(header) > 1:
         line1 = header[0].lower()
         full = '\n'.join(header).lower()
 
@@ -82,32 +84,38 @@ class GenericBeamlineData:
 
     def __init__(self, headerlines=None):
         if headerlines is None:
-            headerlines = []
+            headerlines = ['']
         self.headerlines = list(headerlines)
 
     def beamline_matches(self):
         return len(self.headerlines) > 1
 
     def get_array_labels(self, ncolumns=None):
-        if len(self.headerlines) < 2:
-            return None
-
-        lastline = self.headerlines[-1].strip()
+        lastline = "# "
+        if len(self.headerlines) >= 1:
+            lastline = self.headerlines[-1].strip()
         for cchars in ('#L', '#C', '#', 'C'):
             if lastline.startswith(cchars):
                 lastline = lastline[len(cchars):]
-        for badchar in ',#@%&"\'':
+        for badchar in '\t,#@%&"\'':
             lastline = lastline.replace(badchar, ' ')
         return self._set_labels(lastline.split(), ncolumns=ncolumns)
 
-    def _set_labels(self, labels, ncolumns=None):
+    def _set_labels(self, inlabels, ncolumns=None):
         """
         final parsing, cleaning, ensuring number of columns is satisfied
         """
-        labels = [fix_varname(word.strip().lower()) for word in labels]
+        labels = []
+        for i, word in enumerate(inlabels):
+            word = word.strip().lower()
+            if len(word) > 0:
+                word = fix_varname(word)
+            else:
+                word = 'col%d' % (i+1)
+            labels.append(word)
         for i, lab in enumerate(labels):
             if lab in labels[:i]:
-                labels[i] = lab + '_col%d' % i
+                labels[i] = lab + '_col%d' % (i+1)
 
         if ncolumns is not None and len(labels) < ncolumns:
             for i in range(len(labels), ncolumns):
@@ -169,9 +177,11 @@ class APSGSE_BeamlineData(GenericBeamlineData):
                     label, entry = label.split(':')
                     entry = entry.strip()
                     if ' ' in entry:
-                        entry, units = entry.split(' ')
-                        if 'energy' in entry.lower() and len(units) > 1:
-                            self.energy_units = units
+                        words = [a.strip() for a in entry.split()]
+                        if len(words) > 1:
+                            entry, units = words[0], words[1]
+                            if 'energy' in entry.lower() and len(units) > 1:
+                                self.energy_units = units
                     labels.append(entry)
         return self._set_labels(labels, ncolumns=ncolumns)
 
@@ -277,8 +287,8 @@ class APSXSD_BeamlineData(GenericBeamlineData):
         # here we try two different ways for "older" and "newer" 20BM/9BM fles
         labels = []
         mode = 'search'
-        _tmplabels = {}
-        lablines = []
+        tmplabels = {}
+        maxkey = -1
         for line in self.headerlines:
             line = line[1:].strip()
             if mode == 'search' and 'is a readable list of column' in line:
@@ -286,27 +296,46 @@ class APSXSD_BeamlineData(GenericBeamlineData):
             elif mode == 'found legend':
                 if len(line) < 2:
                     break
-                # print("Label Line : ", line)
                 if ')' in line:
                     if line.startswith('#'):
                         line = line[1:].strip()
-                    if '*' in line:
-                        lablines.extend(line.split('*'))
-                    elif line.count(')') > 1:
-                        words = line.split()
-                        lablines.append('%s %s' % (words[0], words[1]))
-                        if len(words) == 4:
-                            lablines.append('%s %s' % (words[2], words[3]))
-                    else:
-                        lablines.append(line)
 
-        if len(lablines) > 1:
-            labels = ['']*len(lablines)
-            for line in lablines:
-                words = line.strip().split(' ', 1)
-                if ')' in words[0]:
-                    key = int(words[0].replace(')', ''))
-                    labels[key-1] = words[1]
+                    pars  = []
+                    for k in range(len(line)):
+                        if line[k] == ')':
+                            pars.append(k)
+
+                    pars.append(len(line))
+                    for k in range(len(pars)-1):
+                        j = pars[k]
+                        i = max(0, j-2)
+                        key = line[i:j]
+                        z = pars[k+1]
+                        if z < len(line)-3:
+                            for o in range(1, 4):
+                                try:
+                                    _ = int(line[z-o])
+                                except:
+                                    break
+                            z = z-o+1
+                        val = line[j+1:z].strip()
+                        if val.endswith('*'):
+                            val = val[:-1].strip()
+
+                        try:
+                            key = int(key)
+                            maxkey = max(maxkey, key)
+                        except:
+                            break
+                        tmplabels[key] = val
+
+
+        if len(tmplabels) > 1:
+            maxkey = max(maxkey, len(tmplabels))
+            labels = ['']* (maxkey+5)
+            for k, v in tmplabels.items():
+                labels[k] = v
+            labels = [o for o in labels if len(o) > 0]
 
         # older version: no explicit legend, parse last header line, uses '*'
         if len(labels) == 0:

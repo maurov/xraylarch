@@ -20,6 +20,7 @@ from .xrd_pyFAI import integrate_xrd,calc_cake
 from .xrd_bgr import xrd_background
 from .xrd_fitting import peakfinder,peaklocater,peakfilter,peakfitter
 from larch.io import tifffile
+from larch.utils import get_cwd
 
 ##########################################################################
 # CLASSES
@@ -68,27 +69,24 @@ class xrd1d(larch.Group):
 
     mkak 2017.03.15
     '''
-
     def __init__(self, file=None, label=None, x=None, xtype=None, I=None,
                  wavelength=None, energy=None):
 
         self.filename = file
         self.label    = label
-
-        self.energy     = energy
         self.wavelength = wavelength
-
+        self.energy = energy
         if energy is None and wavelength is None:
             self.energy = 19.0
             self.wavelength = lambda_from_E(self.energy)
-        else:
-            if self.energy is None:     self.energy = E_from_lambda(self.wavelength)
-            if self.wavelength is None: self.wavelength = lambda_from_E(self.energy)
+        if self.energy is None:
+            self.energy = E_from_lambda(self.wavelength)
+        if self.wavelength is None:
+            self.wavelength = lambda_from_E(self.energy)
 
         if file is not None:
             self.xrd_from_file(file)
         else:
-
             ## Default values
             self.distance      = None
             self.poni          = None
@@ -99,7 +97,7 @@ class xrd1d(larch.Group):
             self.normalization = None
 
             if I is not None and x is not None:
-                self.xrd_from_2d([x,I],xtype)
+                self.xrd_from_2d([x,I], xtype)
                 self.bkgd = np.zeros(np.shape(self.I))
             else:
                 self.q    = None
@@ -125,14 +123,14 @@ class xrd1d(larch.Group):
         larch.Group.__init__(self)
 
 
-    def xrd_from_2d(self,xy,xtype,verbose=True):
+    def xrd_from_2d(self,xy, xtype, verbose=True):
         self.set_xy_data(xy, xtype)
 
-    def xrd_from_file(self, filename, verbose=True):
+    def xrd_from_file(self, filename, verbose=False):
 
         try:
-            from ..xrmmap import read1DXRDFile
-            head,dat = read1DXRDFile(filename)
+            from ..xrmmap.asciifiles import read1DXRDFile
+            head, dat = read1DXRDFile(filename)
             if verbose:
                 print('Opening xrd data file: %s' % os.path.split(filename)[-1])
             if len(head) < 4:
@@ -178,7 +176,7 @@ class xrd1d(larch.Group):
                 xtype = line.split()[1]
 
         ## data
-        self.set_xy_data(dat,xtype)
+        self.set_xy_data(dat, xtype)
 
     def set_xy_data(self, xy, xtype):
         if xy is not None:
@@ -192,6 +190,11 @@ class xrd1d(larch.Group):
 
             self.imin,self.imax = 0,len(self.q)
             self.bkgd = np.zeros(np.shape(self.I))
+
+    def set_wavelength(self, wavelength):
+        self.wavelength = wavelength
+        self.energy = E_from_lambda(self.wavelength)
+        self.q, self.twth, self.d = calculate_xvalues(self.q, 'q', self.wavelength)
 
     def plot(self,reset=False,bkgd=False):
 
@@ -211,7 +214,7 @@ class xrd1d(larch.Group):
     def reset_bkgd(self):
          self.bkgd = np.zeros(np.shape(self.I))
 
-    def slct_xaxis(self,xtype='',xi=None):
+    def slct_xaxis(self, xtype='', xi=None):
 
         if xtype.startswith('q') or xi == 0:
             x = self.q
@@ -252,13 +255,12 @@ class xrd1d(larch.Group):
                 self.I[self.imin:self.imax],
                 self.bkgd]
 
-    def fit_background(self,**kwargs):
-
-        x,y = self.q[self.imin:self.imax],self.I[self.imin:self.imax]
-        self.bkgd = xrd_background(x,y,**kwargs)
-
-        while len(self.bkgd) < len(y):
-            self.bkgd = np.append(self.bkgd,self.bkgd[-1])
+    def fit_background(self, **kwargs):
+        x = self.q[self.imin:self.imax],
+        y = self.I[self.imin:self.imax]
+        bkgd = xrd_background(x, y, **kwargs)
+        self.bkgd = np.zeros(len(y))
+        self.bkgd[:len(bkgd)] = bkgd
 
     def find_peaks(self,bkgd=False,threshold=None,**kwargs):
 
@@ -402,9 +404,9 @@ class XRD(larch.Group):
 
         if file is None:
             counter = 1
-            while os.path.exists('%s/%s_%03d.xy' % (os.getcwd(),self.title,counter)):
+            while os.path.exists('%s/%s_%03d.xy' % (get_cwd(),self.title,counter)):
                 counter += 1
-            file = '%s/%s_%03d.xy' % (os.getcwd(),self.title,counter)
+            file = '%s/%s_%03d.xy' % (get_cwd(),self.title,counter)
 
         return file
 
@@ -413,9 +415,9 @@ class XRD(larch.Group):
 
         if file is None:
             counter = 1
-            while os.path.exists('%s/%s_%03d.tiff' % (os.getcwd(),self.title,counter)):
+            while os.path.exists('%s/%s_%03d.tiff' % (get_cwd(),self.title,counter)):
                 counter += 1
-            file = '%s/%s_%03d.tiff' % (os.getcwd(),self.title,counter)
+            file = '%s/%s_%03d.tiff' % (get_cwd(),self.title,counter)
 
         tifffile.imsave(file,self.data2D)
 
@@ -424,7 +426,7 @@ class XRD(larch.Group):
 ##########################################################################
 # FUNCTIONS
 
-def calculate_xvalues(x,xtype,wavelength):
+def calculate_xvalues(x, xtype, wavelength):
     '''
     projects given x-axis onto q-, 2theta-, and d-axes
 
@@ -437,7 +439,6 @@ def calculate_xvalues(x,xtype,wavelength):
 
     x = np.array(x).squeeze()
     if xtype.startswith('q'):
-
         q = x
         d = d_from_q(q)
         if wavelength is not None:
@@ -446,7 +447,6 @@ def calculate_xvalues(x,xtype,wavelength):
             twth = np.zeros(len(q))
 
     elif xtype.startswith('2th'):
-
         twth = x
         if wavelength is not None:
             q = q_from_twth(twth,wavelength)

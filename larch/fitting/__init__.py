@@ -1,21 +1,26 @@
 #!/usr/bin/env python
 
 from copy import copy, deepcopy
-
+import random
 import numpy as np
 from scipy.stats import f
 
 import lmfit
-from lmfit import (Parameter, Parameters, Minimizer, conf_interval,
+from lmfit import Parameter
+from lmfit import (Parameters, Minimizer, conf_interval,
                    ci_report, conf_interval2d)
 
-from lmfit.minimizer import eval_stderr, MinimizerResult
+from lmfit.minimizer import MinimizerResult
 from lmfit.model import (ModelResult, save_model, load_model,
                          save_modelresult, load_modelresult)
 from lmfit.confidence import f_compare
-from uncertainties import ufloat, correlated_values
 
+from uncertainties import ufloat, correlated_values
+from uncertainties import wrap as un_wrap
+
+from ..utils import gformat, getfloat_attr
 from ..symboltable import Group, isgroup
+
 
 def isParameter(x):
     return (isinstance(x, Parameter) or
@@ -26,6 +31,113 @@ def param_value(val):
     while isinstance(val, Parameter):
         val = val.value
     return val
+
+def format_param(par, length=10, with_initial=True):
+    value = repr(par)
+    if isParameter(par):
+        value = gformat(par.value, length=length)
+        if not par.vary and par.expr is None:
+            value = f"{value} (fixed)"
+        else:
+            stderr = 'unknown'
+            if par.stderr is not None:
+                stderr = gformat(par.stderr, length=length)
+                value = f"{value} +/-{stderr}"
+                if par.vary and par.expr is None and with_initial:
+                    value = f"{value} (init={gformat(par.init_value, length=length)})"
+            if par.expr is not None:
+                value = f"{value}  = '{par.expr}'"
+    return value
+
+
+def stats_table(results, labels=None, csv_output=False, csv_delim=','):
+    """
+    create a table comparing fit statistics for multiple fit results
+    """
+    stats = {'number of variables': 'nvarys',
+             'chi-square': 'chi_square',
+             'reduced chi-square': 'chi2_reduced',
+             'r-factor': 'rfactor',
+             'Akaike Info Crit': 'aic',
+             'Bayesian Info Crit': 'bic'}
+
+    nfits = len(results)
+    if labels is not None:
+        if len(labels) != len(results):
+            raise ValueError('labels must be a list that is the same length as results')
+
+    columns = [['Statistics']]
+    if labels is None:
+        labels = [f"  Fit {i+1}" for i in range(nfits)]
+    for lab in labels:
+        columns.append([lab])
+
+    for sname, attr in stats.items():
+        columns[0].append(sname)
+        for i, result in enumerate(results):
+            columns[i+1].append(getfloat_attr(result, attr))
+
+    return format_table_columns(columns, csv_output=csv_output, csv_delim=csv_delim)
+
+def paramgroups_table(pgroups, labels=None, csv_output=False, csv_delim=','):
+    """
+    create a table comparing parameters from a Feffit Parameter Grooup for multiple fit results
+    """
+    nfits = len(pgroups)
+    if labels is not None:
+        if len(labels) != len(pgroups):
+            raise ValueError('labels must be a list that is the same length as Parameter Groups')
+
+    columns = [['Parameter']]
+    if labels is None:
+        labels = [f" Fit {i+1}" for i in range(nfits)]
+    for lab in labels:
+        columns.append([lab])
+
+    parnames = []
+    for pgroup in pgroups:
+        for pname in dir(pgroup):
+            if pname not in parnames:
+                parnames.append(pname)
+
+    for pname in parnames:
+        columns[0].append(pname)
+        for i, pgroup in enumerate(pgroups):
+            value = 'N/A'
+            par = getattr(pgroup, pname, None)
+            if par is not None:
+                value = format_param(par, length=10, with_initial=False)
+            columns[i+1].append(value)
+
+    return format_table_columns(columns, csv_output=csv_output, csv_delim=csv_delim)
+
+
+def format_table_columns(columns, csv_output=False, csv_delim=','):
+    hjoin, rjoin, edge = '+', '|', '|'
+    if csv_output:
+       hjoin, rjoin, edge = csv_delim, csv_delim, ''
+
+    ncols = len(columns)
+    nrows = len(columns[0])
+    slen = [2]*ncols
+    for i, col in enumerate(columns):
+        slen[i] = max(5, max([len(row) for row in col]))
+
+    buff = []
+    if not csv_output:
+        header = edge + hjoin.join(['-'*(lx+2) for lx in slen]) + edge
+        buff = [header]
+
+    while len(columns[0]) > 0:
+        values = [c.pop(0) for c in columns]
+        row = rjoin.join([f" {l:{slen[i]}.{slen[i]}s} " for i, l in enumerate(values)])
+        buff.append(edge + row + edge)
+        if not csv_output and len(buff) == 2:
+            buff.append(header)
+    if not csv_output:
+        buff.append(header)
+    return '\n'.join(buff)
+
 
 def f_test(ndata, nvars, chisquare, chisquare0, nfix=1):
     """return the F-test value for the following input values:
@@ -41,22 +153,65 @@ def confidence_report(conf_vals, **kws):
     """
     return ci_report(conf_vals)
 
+def asteval_with_uncertainties(*vals, **kwargs):
+    """Calculate object value, given values for variables.
+
+    This is used by the uncertainties package to calculate the
+    uncertainty in an object even with a complicated expression.
+
+    """
+    _obj = kwargs.get('_obj', None)
+    _pars = kwargs.get('_pars', None)
+    _names = kwargs.get('_names', None)
+    _asteval = _pars._asteval
+    if (_obj is None or _pars is None or _names is None or
+         _asteval is None or _obj._expr_ast is None):
+        return 0
+    for val, name in zip(vals, _names):
+        _asteval.symtable[name] = val
+
+    # re-evaluate all constraint parameters to
+    # force the propagation of uncertainties
+    [p._getval() for p in _pars.values()]
+    return _asteval.eval(_obj._expr_ast)
+
+
+wrap_ueval = un_wrap(asteval_with_uncertainties)
+
+
+def eval_stderr(obj, uvars, _names, _pars):
+    """Evaluate uncertainty and set ``.stderr`` for a parameter `obj`.
+
+    Given the uncertain values `uvars` (list of `uncertainties.ufloats`),
+    a list of parameter names that matches `uvars`, and a dictionary of
+    parameter objects, keyed by name.
+
+    This uses the uncertainties package wrapped function to evaluate the
+    uncertainty for an arbitrary expression (in ``obj._expr_ast``) of
+    parameters.
+
+    """
+    if not isinstance(obj, Parameter) or getattr(obj, '_expr_ast', None) is None:
+        return
+    uval = wrap_ueval(*uvars, _obj=obj, _names=_names, _pars=_pars)
+    try:
+        obj.stderr = uval.std_dev
+    except Exception:
+        obj.stderr = 0
+
 
 class ParameterGroup(Group):
     """
     Group for Fitting Parameters
     """
-    def __init__(self, name=None, _larch=None, **kws):
+    def __init__(self, name=None, **kws):
         if name is not None:
             self.__name__ = name
-
-        self._larch = _larch
-        self.__params__ = None
-        if _larch is not None:
-            self.__params__ = Parameters(asteval=_larch.symtable._sys.fiteval)
+        if '_larch' in kws:
+            kws.pop('_larch')
+        self.__params__ = Parameters()
         Group.__init__(self)
         self.__exprsave__ = {}
-
         for key, val in kws.items():
             expr = getattr(val, 'expr', None)
             if expr is not None:
@@ -72,7 +227,7 @@ class ParameterGroup(Group):
         return '<Param Group {:s}>'.format(self.__name__)
 
     def __setattr__(self, name, val):
-        if isinstance(val, Parameter):
+        if isParameter(val):
             if val.name != name:
                 # allow 'a=Parameter(2, ..)' to mean Parameter(name='a', value=2, ...)
                 nval = None
@@ -82,13 +237,23 @@ class ParameterGroup(Group):
                     pass
                 if nval is not None:
                     val.value = nval
+            skip = getattr(val, 'skip', None)
             self.__params__.add(name, value=val.value, vary=val.vary, min=val.min,
                               max=val.max, expr=val.expr, brute_step=val.brute_step)
             val = self.__params__[name]
+
+            val.skip = skip
+        elif hasattr(self, '__params__') and not name.startswith('__'):
+            self.__params__._asteval.symtable[name] = val
         self.__dict__[name] = val
 
+    def __delattr__(self, name):
+        self.__dict__.pop(name)
+        if name in self.__params__:
+            self.__params__.pop(name)
+
     def __add(self, name, value=None, vary=True, min=-np.inf, max=np.inf,
-              expr=None, stderr=None, correl=None, brute_step=None):
+              expr=None, stderr=None, correl=None, brute_step=None, skip=None):
         if expr is None and isinstance(value, str):
             expr = value
             value = None
@@ -97,12 +262,45 @@ class ParameterGroup(Group):
                               expr=expr, brute_step=brute_step)
             self.__params__[name].stderr = stderr
             self.__params__[name].correl = correl
+            self.__params__[name].skip = skip
             self.__dict__[name] = self.__params__[name]
 
 
-def param_group(_larch=None, **kws):
+def param_group(**kws):
     "create a parameter group"
-    return ParameterGroup(_larch=_larch, **kws)
+    return ParameterGroup(**kws)
+
+def randstr(n):
+    return ''.join([chr(random.randint(97, 122)) for i in range(n)])
+
+class unnamedParameter(Parameter):
+    """A Parameter that can be nameless"""
+    def __init__(self, name=None, value=None, vary=True, min=-np.inf, max=np.inf,
+                 expr=None, brute_step=None, user_data=None, skip=None):
+        if name is None:
+            name = randstr(8)
+        self.name = name
+        self.user_data = user_data
+        self.init_value = value
+        self.min = min
+        self.max = max
+        self.brute_step = brute_step
+        self.vary = vary
+        self.skip = skip
+        self._expr = expr
+        self._expr_ast = None
+        self._expr_eval = None
+        self._expr_deps = []
+        self._delay_asteval = False
+        self.stderr = None
+        self.correl = None
+        self.from_internal = lambda val: val
+        self._val = value
+        self._init_bounds()
+        Parameter.__init__(self, name, value=value, vary=vary,
+                           min=min, max=max, expr=expr,
+                           brute_step=brute_step,
+                           user_data=user_data)
 
 def param(*args, **kws):
     "create a fitting Parameter as a Variable"
@@ -119,10 +317,8 @@ def param(*args, **kws):
         kws.pop('_larch')
     if 'vary' not in kws:
         kws['vary'] = False
-    if 'name' not in kws:
-        kws['name'] = '_tmp_param_'
 
-    return Parameter(*args, **kws)
+    return unnamedParameter(*args, **kws)
 
 def guess(value,  **kws):
     """create a fitting Parameter as a Variable.
@@ -137,30 +333,46 @@ def is_param(obj):
     """return whether an object is a Parameter"""
     return isParameter(obj)
 
-def group2params(paramgroup, _larch=None):
-    """take a Group of Parameter objects (and maybe other things)
-    and put them into Larch's current fiteval namespace
+def dict2params(pars):
+    """sometimes we get a plain dict of Parameters,
+    with vals that are Parameter objects"""
+    if isinstance(pars, Parameters):
+        return pars
+    out = Parameters()
+    for key, val in pars.items():
+        if isinstance(val, Parameter):
+            out[key] = val
+    return out
 
-    returns a lmfit Parameters set, ready for use in fitting
+def group2params(paramgroup):
+    """take a Group of Parameter objects (and maybe other things)
+    and put them into a lmfit.Parameters, ready for use in fitting
     """
-    if _larch is None:
-        return None
+    if isinstance(paramgroup, Parameters):
+        return paramgroup
+    if isinstance(paramgroup, dict):
+        params = Parameters()
+        for key, val in paramgroup.items():
+            if isinstance(val, Parameter):
+                params[key] = val
+        return params
+
 
     if isinstance(paramgroup, ParameterGroup):
         return paramgroup.__params__
 
-    fiteval  = _larch.symtable._sys.fiteval
-    params = Parameters(asteval=fiteval)
+    params = Parameters()
     if paramgroup is not None:
         for name in dir(paramgroup):
             par = getattr(paramgroup, name)
+            if getattr(par, 'skip', None) not in (False, None):
+                continue
             if isParameter(par):
                 params.add(name, value=par.value, vary=par.vary,
                            min=par.min, max=par.max,
                            brute_step=par.brute_step)
-
             else:
-                fiteval.symtable[name] = par
+                params._asteval.symtable[name] = par
 
         # now set any expression (that is, after all symbols are defined)
         for name in dir(paramgroup):
@@ -174,9 +386,12 @@ def params2group(params, paramgroup):
     """fill Parameter objects in paramgroup with
     values from lmfit.Parameters
     """
+    _params = getattr(paramgroup, '__params__', None)
     for name, param in params.items():
         this = getattr(paramgroup, name, None)
         if isParameter(this):
+            if _params is not None:
+                _params[name] = this
             for attr in ('value', 'vary', 'stderr', 'min', 'max', 'expr',
                          'name', 'correl', 'brute_step', 'user_data'):
                 setattr(this, attr, getattr(param, attr, None))
@@ -189,15 +404,14 @@ def params2group(params, paramgroup):
 
 def minimize(fcn, paramgroup, method='leastsq', args=None, kws=None,
              scale_covar=True, iter_cb=None, reduce_fcn=None, nan_polcy='omit',
-             _larch=None, **fit_kws):
+             **fit_kws):
     """
     wrapper around lmfit minimizer for Larch
     """
-    fiteval = _larch.symtable._sys.fiteval
     if isinstance(paramgroup, ParameterGroup):
         params = paramgroup.__params__
     elif isgroup(paramgroup):
-        params = group2params(paramgroup, _larch=_larch)
+        params = group2params(paramgroup)
     elif isinstance(Parameters):
         params = paramgroup
     else:
@@ -228,7 +442,7 @@ def minimize(fcn, paramgroup, method='leastsq', args=None, kws=None,
     return out
 
 def fit_report(fit_result, modelpars=None, show_correl=True, min_correl=0.1,
-               sort_pars=True, _larch=None, **kws):
+               sort_pars=True, **kws):
     """generate a report of fitting results
     wrapper around lmfit.fit_report
 
@@ -276,7 +490,7 @@ def fit_report(fit_result, modelpars=None, show_correl=True, min_correl=0.1,
                                     min_correl=min_correl, sort_pars=sort_pars)
         else:
             try:
-                result = group2params(fit_result, _larch=_larch)
+                result = group2params(fit_result)
                 return lmfit.fit_report(result, modelpars=modelpars,
                                         show_correl=show_correl,
                                         min_correl=min_correl, sort_pars=sort_pars)
@@ -295,7 +509,7 @@ def confidence_intervals(fit_result, sigmas=(1, 2, 3), **kws):
     result = getattr(fit_result, 'fit_details', None)
     return conf_interval(fitter, result, sigmas=sigmas, **kws)
 
-def chi2_map(fit_result, xname, yname, nx=11, ny=11, sigma=3, **kws):
+def chi2_map(fit_result, xname, yname, nx=21, ny=21, sigma=3, **kws):
     """generate a confidence map for any two parameters for a fit
 
     Arguments
@@ -303,8 +517,8 @@ def chi2_map(fit_result, xname, yname, nx=11, ny=11, sigma=3, **kws):
        minout   output of minimize() fit (must be run first)
        xname    name of variable parameter for x-axis
        yname    name of variable parameter for y-axis
-       nx       number of steps in x [11]
-       ny       number of steps in y [11]
+       nx       number of steps in x [21]
+       ny       number of steps in y [21]
        sigma    scale for uncertainty range [3]
 
     Returns
@@ -322,12 +536,6 @@ def chi2_map(fit_result, xname, yname, nx=11, ny=11, sigma=3, **kws):
     if fitter is None or result is None:
         raise ValueError("chi2_map needs valid fit result as first argument")
 
-    c2_scale = fit_result.chi_square / result.chisqr
-
-    def scaled_chisqr(ndata, nparas, new_chi, best_chi, nfix=1.):
-        """return scaled chi-sqaure, instead of probability"""
-        return new_chi * c2_scale
-
     x = result.params[xname]
     y = result.params[yname]
     xrange = (x.value + sigma * x.stderr, x.value - sigma * x.stderr)
@@ -335,14 +543,7 @@ def chi2_map(fit_result, xname, yname, nx=11, ny=11, sigma=3, **kws):
 
     return conf_interval2d(fitter, result, xname, yname,
                            limits=(xrange, yrange),
-                           prob_func=scaled_chisqr,
-                           nx=nx, ny=ny, **kws)
-
-def _Parameters(*arg, _larch=None, **kws):
-    if _larch is not None and 'asteval' not in kws:
-        kws['asteval'] =_larch.symtable._sys.fiteval
-    return Parameters(*arg, **kws)
-
+                           nx=nx, ny=ny, nsigma=2*sigma, **kws)
 
 _larch_name = '_math'
 exports = {'param': param,
@@ -356,7 +557,7 @@ exports = {'param': param,
            'minimize': minimize,
            'ufloat': ufloat,
            'fit_report': fit_report,
-           'Parameters': _Parameters,
+           'Parameters': Parameters,
            'Parameter': Parameter,
            'lm_minimize': minimize,
            'lm_save_model': save_model,
@@ -367,7 +568,7 @@ exports = {'param': param,
 
 for name in ('BreitWignerModel', 'ComplexConstantModel',
              'ConstantModel', 'DampedHarmonicOscillatorModel',
-             'DampedOscillatorModel', 'DonaichModel',
+             'DampedOscillatorModel', 'DoniachModel',
              'ExponentialGaussianModel', 'ExponentialModel',
              'ExpressionModel', 'GaussianModel', 'Interpreter',
              'LinearModel', 'LognormalModel', 'LorentzianModel',

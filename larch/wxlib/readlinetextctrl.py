@@ -1,20 +1,20 @@
 #!/usr/bin/env python
 #
-from __future__ import print_function
 import sys
+import time
+from pathlib import Path
 
 import wx
-import os
-import time
 
+from pyshortcuts import uname, get_homedir
 DEFAULT_HISTORYFILE = '.wxlarch_hist'
 MAX_HISTORY = 5000
 
 class ReadlineTextCtrl(wx.TextCtrl):
-    def __init__(self, parent=None, id=-1, value='', size=(400,-1),
+    def __init__(self, parent=None, value='', size=(400,-1),
                  historyfile=None,
                  style=wx.ALIGN_LEFT|wx.TE_PROCESS_ENTER, **kws):
-        wx.TextCtrl.__init__(self, parent, id, value=value,
+        wx.TextCtrl.__init__(self, parent, -1, value=value,
                              size=size, style=style, **kws)
 
         self._val = value
@@ -22,13 +22,12 @@ class ReadlineTextCtrl(wx.TextCtrl):
         self.hist_file = historyfile
         self.hist_buff = []
         if self.hist_file is None:
-            self.hist_file= os.path.join(os.environ.get('HOME','.'),
-                                         DEFAULT_HISTORYFILE)
+            self.hist_file= Path(get_homedir(), DEFAULT_HISTORYFILE).as_posix()
         # self.LoadHistory()
         self.hist_mark = len(self.hist_buff)
         self.hist_sessionstart = self.hist_mark
 
-        if sys.platform == 'darwin':
+        if uname == 'darwin':
             self.Bind(wx.EVT_KEY_UP,     self.onChar)
         else:
             self.Bind(wx.EVT_CHAR,       self.onChar)
@@ -54,13 +53,11 @@ class ReadlineTextCtrl(wx.TextCtrl):
 
     def onKillFocus(self, event=None):
         self.__GetMark()
-        if event is not None:
-            event.Skip()
+
 
     def onSetFocus(self, event=None):
         self.__SetMark()
-        if event is not None:
-            event.Skip()
+
 
     def onChar(self, event):
         """ on Character event"""
@@ -148,8 +145,6 @@ class ReadlineTextCtrl(wx.TextCtrl):
         elif ctrl:
             pass
         self.Refresh()
-        if do_skip:
-            event.Skip()
         return
 
     def AddToHistory(self, text=''):
@@ -161,7 +156,7 @@ class ReadlineTextCtrl(wx.TextCtrl):
         if filename is None:
             filename = self.hist_file
         try:
-            fout = open(filename,'w')
+            fout = open(filename,'w', encoding=sys.getdefaultencoding())
         except IOError:
             print( 'Cannot save history ', filename)
 
@@ -174,7 +169,7 @@ class ReadlineTextCtrl(wx.TextCtrl):
         fout.close()
 
     def LoadHistory(self):
-        if os.path.exists(self.hist_file):
+        if Path(self.hist_file).exists():
             self.hist_buff = []
             for txt in open(self.hist_file,'r').readlines():
                 stxt = txt.strip()

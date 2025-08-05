@@ -2,7 +2,6 @@
 
 import os
 import sys
-import copy
 import time
 import gc
 
@@ -84,7 +83,6 @@ class EscanData:
         self.y = numpy.array(0)
         if self.bad_channels is None:
             self.bad_channels = []
-        gc.collect()
 
 
     def message_printer(self,s,val):
@@ -170,12 +168,12 @@ class EscanData:
             if retval is not None:
                 msg = "problem reading file %s" % fname
                 self.ShowMessage(msg)
-            gc.collect()
         return retval
 
     def _getarray(self, name=None, correct=True):
         i = None
         arr = None
+        name = name.lower()
         for ip, pname in enumerate(self.pos_desc):
             if name.lower() == pname.lower():
                 return self.pos[ip]
@@ -222,14 +220,14 @@ class EscanData:
 
         self.ShowProgress(1.0)
         #  self.ShowMessage("opening file %s  ... " % fname)
-        try:
+        if True: # try:
             f = open(fname,'r')
             lines = f.readlines()
             lines.reverse()
             f.close()
-        except:
-            self.ShowMessage("ERROR: general error reading file %s " % fname)
-            return None
+        # except:
+        #     self.ShowMessage("ERROR: general error reading file %s " % fname)
+        #     return None
 
         line1    = lines.pop()
         if 'Epics Scan' not in line1:
@@ -276,7 +274,7 @@ class EscanData:
             except:
                 break
             label,pvname = [i.strip() for i in detail.split('-->')]
-            label = label[1:-1]
+            label = label[1:-1].lower()
             if key.startswith('P'):
                 self.pos_desc.append(label)
                 self.pos_addr.append(pvname)
@@ -362,7 +360,7 @@ class EscanData:
             nx = len(self.x)
             self.y = []
 
-        self.data = numpy.vstack((self.pos, self.det))
+        self.data = numpy.vstack((self.pos, self.sums))
         tnsums = [len(i) for i in self.sums_list]
         tnsums.sort()
         nsums = tnsums[-1]
@@ -370,8 +368,8 @@ class EscanData:
             while len(s) < nsums:  s.append(-1)
 
         # finally, icr/ocr corrected sums
-        self.det_corr  = 1.0 * self.det[:]
-        self.sums_corr = 1.0 * self.sums[:]
+        self.det_corr  = self.det[:]*1.0
+        self.sums_corr = self.sums[:]*1.0
 
         if self.correct_deadtime:
             idet = -1
@@ -778,7 +776,7 @@ TWO_THETA:   10.0000000 10.0000000 10.0000000 10.0000000"""
         fout.close()
 
 
-def gsescan_group(fname, _larch=None, bad=None, **kws):
+def gsescan_group(fname, bad=None, **kws):
     """simple mapping of EscanData file to larch groups"""
     escan = EscanData(fname, bad=bad)
     if escan.status is not None:
@@ -827,7 +825,7 @@ GSE_header_BMD = ['# XDI/1.0  GSE/1.0',
 
 
 def gsescan_deadtime_correct(fname, channelname, subdir='DT_Corrected',
-                             bad=None, _larch=None):
+                             bad=None):
     """convert GSE ESCAN fluorescence XAFS scans to dead time corrected files"""
     try:
        sg = gsescan_group(fname, bad=bad)

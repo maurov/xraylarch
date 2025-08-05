@@ -4,10 +4,6 @@ import os
 import sys
 import time
 from configparser import  ConfigParser
-from io import StringIO
-
-from larch.utils import OrderedDict
-
 
 conf_sects = {'general': {},
               'xps':{'bools':('use_ftp',)},
@@ -18,16 +14,15 @@ conf_sects = {'general': {},
                        'floats':('start1','stop1', 'step1','time1',
                                  'start2','stop2', 'step2')}}
 
-__c = (('general', ('mapdb', 'struck', 'scaler', 'xmap', 'mono',
-                   'fileplugin', 'basedir', 'scandir', 'envfile')),
-       ('xps',  ('host', 'user', 'passwd', 'group', 'positioners')),
-       ('scan', ('filename', 'dimension', 'comments', 'pos1', 'start1', 'stop1',
-                 'step1', 'time1', 'pos2', 'start2', 'stop2', 'step2')),
-       ('xrf',      ('use', 'type', 'prefix', 'plugin')),
-       ('fast_positioners', None),
-       ('slow_positioners', None))
-
-conf_objs = OrderedDict(__c)
+conf_objs = {'general': ('mapdb', 'struck', 'scaler', 'xmap', 'mono',
+                         'fileplugin', 'basedir', 'scandir', 'envfile'),
+             'xps': ('host', 'user', 'passwd', 'group', 'positioners'),
+             'scan': ('filename', 'dimension', 'comments', 'pos1', 'start1',
+                      'stop1', 'step1', 'time1', 'pos2', 'start2', 'stop2',
+                      'step2'),
+             'xrf':  ('use', 'type', 'prefix', 'plugin'),
+             'fast_positioners': None,
+             'slow_positioners': None}
 
 conf_files = ('Scan.ini',)
 
@@ -79,7 +74,7 @@ class FastMapConfig(object):
                     conf_found = True
                     break
         if not conf_found:
-            self.cp.readfp(StringIO(default_conf))
+            self.cp.read_string(default_conf)
             self._process_data()
 
     def Read(self,fname=None):
@@ -102,7 +97,7 @@ class FastMapConfig(object):
             thissect = {}
             is_ordered = False
             if 'ordered' in opts:
-                thissect = OrderedDict()
+                thissect = {}
                 is_ordered = True
             for opt in self.cp.options(sect):
                 get = self.cp.get

@@ -99,7 +99,7 @@ class GSEMCA_File(Group):
             if dt_correct:
                 mdat = mdat * mca.dt_factor
             dat = dat + mdat
-        return dat.astype(np.int)
+        return dat.astype(np.int32)
 
     def predict_pileup(self, scale=None):
         """predict pileup for an MCA spectra from its auto-correlation.
@@ -244,7 +244,7 @@ class GSEMCA_File(Group):
         self.counts = self.get_counts()
         self.raw    = self.get_counts(dt_correct=False)
         self.name   = 'mcasum'
-        self.energy = mca0.energy[:]
+        self.energy = mca0.energy[:]*1.0
         self.environ = mca0.environ
         self.real_time = mca0.real_time
         self.live_time = mca0.live_time
@@ -403,6 +403,6 @@ class GSEMCA_File(Group):
         fp.close()
 
 
-def gsemca_group(filename=None, text=None, _larch=None, **kws):
+def gsemca_group(filename=None, text=None, **kws):
     """read GSECARS MCA file to larch group"""
     return GSEMCA_File(filename=filename, text=text)

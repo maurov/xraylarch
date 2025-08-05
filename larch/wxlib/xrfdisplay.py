@@ -4,42 +4,37 @@ GUI Frame for XRF display, reading larch MCA group
 
 """
 import sys
-import os
 import time
 import copy
 from functools import partial
-
+from pathlib import Path
 import wx
 import wx.lib.mixins.inspection
 import wx.lib.scrolledpanel as scrolled
 import wx.dataview as dv
 import wx.lib.colourselect  as csel
 
-try:
-    from wx._core import PyDeadObjectError
-except:
-    PyDeadObjectError = Exception
-
-
 import numpy as np
 import matplotlib
 from matplotlib.ticker import LogFormatter, FuncFormatter
 
-from wxmplot import PlotPanel
+from pyshortcuts import uname, bytes2str, get_cwd, fix_filename
 
-from wxutils import (SimpleText, EditableListBox, Font, pack, Popup,
-                     get_icon, SetTip, Button, Check, MenuItem, Choice,
-                     FileOpen, FileSave, fix_filename, HLine, GridPanel,
-                     CEN, LEFT, RIGHT)
+from wxmplot import PlotPanel
+from . import (SimpleText, EditableListBox, Font, pack, Popup,
+               get_icon, SetTip, Button, Check, MenuItem, Choice,
+               FileOpen, FileSave, HLine, GridPanel,
+               CEN, LEFT, RIGHT, PeriodicTablePanel,
+               FONTSIZE, FONTSIZE_FW)
 
 from ..math import index_of
-from ..utils import bytes2str, debugtime
 from ..io import GSEMCA_File
 from ..site_config import icondir
 from ..interpreter import Interpreter
 
+from .gui_utils import LarchWxApp
 from .larchframe import LarchFrame
-from .periodictable import PeriodicTablePanel
+# from .periodictable import PeriodicTablePanel
 
 from .xrfdisplay_utils import (XRFCalibrationFrame, ColorsFrame,
                                XrayLinesFrame, XRFDisplayConfig, XRFGROUP,
@@ -79,7 +74,7 @@ class XRFDisplayFrame(wx.Frame):
     def __init__(self, _larch=None, parent=None, filename=None,
                  size=(725, 450), axissize=None, axisbg=None,
                  title='XRF Display', exit_callback=None,
-                 output_title='XRF', **kws):
+                 output_title='XRF', roi_callback=None, **kws):
 
         if size is None: size = (725, 450)
         wx.Frame.__init__(self, parent=parent,
@@ -88,6 +83,7 @@ class XRFDisplayFrame(wx.Frame):
         self.subframes = {}
         self.data = None
         self.title = title
+        self.roi_callback = roi_callback
         self.plotframe = None
         self.wids = {}
         self.larch = _larch
@@ -97,10 +93,7 @@ class XRFDisplayFrame(wx.Frame):
             self.larch_buffer = parent
             if not isinstance(parent, LarchFrame):
                 self.larch_buffer = LarchFrame(_larch=self.larch,
-                                               is_standalone=False)
-                self.larch_buffer.Show()
-                self.larch_buffer.Raise()
-                self.larch_buffer.Hide()
+                                               is_standalone=False, with_raise=False)
                 self.subframes['larchframe'] = self.larch_buffer
             self.larch = self.larch_buffer.larchshell
         self.init_larch()
@@ -139,13 +132,16 @@ class XRFDisplayFrame(wx.Frame):
         self._menus = []
         self.createMainPanel()
         self.createMenus()
-        self.SetFont(Font(9, serif=True))
+        self.SetFont(wx.Font(9, wx.SWISS, wx.NORMAL, wx.NORMAL))
         self.statusbar = self.CreateStatusBar(4)
         self.statusbar.SetStatusWidths([-5, -3, -3, -4])
         statusbar_fields = ["XRF Display", " ", " ", " "]
         for i in range(len(statusbar_fields)):
             self.statusbar.SetStatusText(statusbar_fields[i], i)
         if filename is not None:
+            if isinstance(filename, Path):
+                filename = Path(filename).absolute().as_posix()
+
             self.add_mca(GSEMCA_File(filename), filename=filename, plot=True)
 
 
@@ -178,7 +174,7 @@ class XRFDisplayFrame(wx.Frame):
             self.xmarker_left  = min(ix1, ix2)
             self.xmarker_right = max(ix1, ix2)
 
-        if side == 'left':
+        if side == 'left' and ix is not None:
             self.energy_for_zoom = self.mca.energy[ix]
         self.update_status()
         self.draw()
@@ -262,26 +258,24 @@ class XRFDisplayFrame(wx.Frame):
         if self.mca is None:
             return
 
-        if (self.xmarker_left is not None and
-            self.xmarker_right is not None):
-            self.ShowROIStatus(self.xmarker_left,
-                               self.xmarker_right,
-                               name='', panel=3)
-
         if self.selected_roi is not None:
             roi = self.selected_roi
             left, right = roi.left, roi.right
             self.ShowROIStatus(left, right, name=roi.name, panel=0)
             self.ShowROIPatch(left, right)
+        elif (self.xmarker_left is not None and self.xmarker_right is not None):
+            self.ShowROIStatus(self.xmarker_left, self.xmarker_right,
+                               name='unnamed', panel=3)
+
 
     def createPlotPanel(self):
         """mca plot window"""
-        pan = PlotPanel(self, fontsize=7,
-                        axisbg='#FEFEFE',
-                        # axissize=[0.01, 0.11, 0.97, 0.87],
+        pan = PlotPanel(self, fontsize=7, axisbg='#FFFFFF',
                         with_data_process=False,
                         output_title='test.xrf',
                         messenger=self.write_message)
+        pan.SetSize((650, 350))
+
         pan.conf.grid_color='#E5E5C0'
         pan.conf.show_grid = False
         pan.conf.canvas.figure.set_facecolor('#FCFCFE')
@@ -296,11 +290,12 @@ class XRFDisplayFrame(wx.Frame):
 
     def createControlPanel(self):
         ctrlpanel = wx.Panel(self, name='Ctrl Panel')
-
+        ptable_fontsize = 11 if uname=='darwin' else 9
         ptable = PeriodicTablePanel(ctrlpanel, onselect=self.onShowLines,
                                     tooltip_msg='Select Element for KLM Lines',
-                                    fontsize=9)
+                                    fontsize=ptable_fontsize, size=(360, 180))
         self.wids['ptable'] = ptable
+        self.font_fixedwidth = wx.Font(FONTSIZE_FW, wx.MODERN, wx.NORMAL, wx.NORMAL)
 
         labstyle = wx.ALIGN_LEFT|wx.EXPAND
         ctrlstyle = wx.ALIGN_LEFT
@@ -414,14 +409,21 @@ class XRFDisplayFrame(wx.Frame):
 
         dvstyle = dv.DV_SINGLE|dv.DV_VERT_RULES|dv.DV_ROW_LINES
         xlines = dv.DataViewListCtrl(ctrlpanel, style=dvstyle)
+        xlines.SetFont(self.font_fixedwidth)
         self.wids['xray_lines'] = xlines
-        xlines.AppendTextColumn(' Line ',         width=60)
-        xlines.AppendTextColumn(' Energy(keV) ',  width=110)
-        xlines.AppendTextColumn(' Strength ',     width=85)
-        xlines.AppendTextColumn(' Levels ',       width=75)
+
+        xw = (55, 105, 90, 95)
+        if uname == 'darwin':
+            xw = (55, 80, 65, 120)
+        elif uname == 'win':
+            xw = (55, 120, 90, 90)
+        xlines.AppendTextColumn('Line',         width=xw[0])
+        xlines.AppendTextColumn('Energy(keV)',  width=xw[1])
+        xlines.AppendTextColumn('Strength',     width=xw[2])
+        xlines.AppendTextColumn('Levels',       width=xw[3])
         for col in (0, 1, 2, 3):
             this = xlines.Columns[col]
-            this.Sortable = True
+            this.Sortable = False
             align = RIGHT
             if col in (0, 3):
                 align = wx.ALIGN_LEFT
@@ -429,7 +431,8 @@ class XRFDisplayFrame(wx.Frame):
 
         xlines.SetMinSize((300, 240))
         xlines.Bind(dv.EVT_DATAVIEW_SELECTION_CHANGED,
-                    self.onSelectXrayLine)
+
+        self.onSelectXrayLine)
         store = xlines.GetStore()
 
         # main layout
@@ -456,10 +459,9 @@ class XRFDisplayFrame(wx.Frame):
         plotpanel = self.panel = self.createPlotPanel()
         plotpanel.yformatter = self._formaty
 
-        tx, ty = self.wids['ptable'].GetBestSize()
-        cx, cy = ctrlpanel.GetBestSize()
-        px, py = plotpanel.GetBestSize()
-
+        tx, ty = self.wids['ptable'].GetBestVirtualSize()
+        cx, cy = ctrlpanel.GetBestVirtualSize()
+        px, py = plotpanel.GetBestVirtualSize() # (650, 350)
         self.SetSize((max(cx, tx)+px, 25+max(cy, py)))
 
         style = wx.ALIGN_LEFT|wx.EXPAND|wx.ALL
@@ -481,7 +483,7 @@ class XRFDisplayFrame(wx.Frame):
         if not symtab.has_group(XRFGROUP):
             self.larch.eval(MAKE_XRFGROUP_CMD)
 
-        fico = os.path.join(icondir, ICON_FILE)
+        fico = Path(icondir, ICON_FILE).as_posix()
         try:
             self.SetIcon(wx.Icon(fico, wx.BITMAP_TYPE_ICO))
         except:
@@ -493,17 +495,19 @@ class XRFDisplayFrame(wx.Frame):
         else:
             self.mca2 = self.mca
             self.mca = mca
-
+        # print("Add MCA ", mca, as_mca2)
         xrfgroup = self.larch.symtable.get_group(XRFGROUP)
         mcaname = next_mcaname(self.larch)
         if filename is not None:
+            if isinstance(filename, Path):
+                filename = Path(filename).absolute().as_posix()
             self.larch.eval(read_mcafile.format(group=XRFGROUP,
                                                 name=mcaname,
                                                 filename=filename))
             if label is None:
-                label = filename
-        if label is None and mca.filename is not None:
-            label = mca.filename
+                label = Path(filename).absolute().name
+        if label is None and hasattr(mca, 'filename'):
+            label = Path(mca.filename).absolute().name
         if label is None:
             label = mcaname
         self.mca.label = label
@@ -511,6 +515,7 @@ class XRFDisplayFrame(wx.Frame):
         setattr(xrfgroup, '_mca2', getattr(xrfgroup, '_mca', ''))
         setattr(xrfgroup, '_mca', mcaname)
         setattr(xrfgroup, mcaname, mca)
+        # print("Add MCA ", xrfgroup, mcaname)
         if plot:
             self.plotmca(self.mca)
             if as_mca2:
@@ -622,6 +627,9 @@ class XRFDisplayFrame(wx.Frame):
         self.onROI(label=roiname)
         if self.selected_elem is not None:
             self.onShowLines(elem=self.selected_elem)
+        if self.roi_callback is not None:
+            xrange = [self.mca.energy[left], self.mca.energy[right]]
+            self.roi_callback(roiname, xrange=xrange, action='add', units='keV', roitype='XRF')
         return True
 
     def onConfirmDelROI(self, event=None):
@@ -629,6 +637,8 @@ class XRFDisplayFrame(wx.Frame):
         msg = "Delete ROI {:s}?".format(roiname)
         if (wx.ID_YES == Popup(self, msg,   'Delete ROI?', style=wx.YES_NO)):
             self.onDelROI()
+            if self.roi_callback is not None:
+                self.roi_callback(roiname, action='delete', roitype='XRF')
 
     def onRenameROI(self, event=None):
         roiname = self.get_roiname()
@@ -755,6 +765,8 @@ class XRFDisplayFrame(wx.Frame):
         MenuItem(self, fmenu, "&Save ASCII Column File\tCtrl+A",
                  "Save Column File",  self.onSaveColumnFile)
 
+        MenuItem(self, fmenu, "&Inspect \tCtrl+J",
+                 " wx inspection tool ",  self.showInspectionTool)
         fmenu.AppendSeparator()
         # MenuItem(self, fmenu, "Save ROIs to File",
         #         "Save ROIs to File",  self.onSaveROIs)
@@ -1168,7 +1180,8 @@ class XRFDisplayFrame(wx.Frame):
 
         self.xdata = 1.0*x[:]
         self.ydata = 1.0*y[:]
-        ydat = 1.0*y[:] + 1.e-9
+        self.ydata[np.where(self.ydata<1.e-9)] = 1.e-9
+        ydat = self.ydata
         kwargs['ymax'] = max(ydat)*1.25
         kwargs['ymin'] = 0.9
         kwargs['xmax'] = max(self.xdata)
@@ -1189,9 +1202,11 @@ class XRFDisplayFrame(wx.Frame):
                     continue
                 yroi[r.left:r.right] = y[r.left:r.right]
             yroi = np.ma.masked_less(yroi, 0)
+            xroi = 1.0*x[:]
+            xroi[yroi< 0.0] = np.nan
             if yroi.max() > 0:
                 kwargs['color'] = self.conf.roi_color
-                panel.oplot(x, yroi, label='rois', **kwargs)
+                panel.oplot(xroi, yroi, label='rois', **kwargs)
         yscale = {False:'linear', True:'log'}[self.ylog_scale]
         panel.set_viewlimits()
         panel.set_logscale(yscale=yscale)
@@ -1209,9 +1224,9 @@ class XRFDisplayFrame(wx.Frame):
         if is_mca2:
             mca = self.mca2
             ix = 2
-        mca.counts = counts[:]
+        mca.counts = 1.0*counts[:]
         if energy is not None:
-            mca.energy = energy[:]
+            mca.energy = 1.0*energy[:]
         xnpts = 1.0/len(energy)
         nrois = len(mca.rois)
         if not is_mca2 and with_rois and nrois > 0:
@@ -1277,13 +1292,13 @@ class XRFDisplayFrame(wx.Frame):
 
     def onReadMCAFile(self, event=None):
         dlg = wx.FileDialog(self, message="Open MCA File for reading",
-                            defaultDir=os.getcwd(),
+                            defaultDir=get_cwd(),
                             wildcard=FILE_WILDCARDS,
                             style = wx.FD_OPEN|wx.FD_CHANGE_DIR)
 
         filename = None
         if dlg.ShowModal() == wx.ID_OK:
-            filename = os.path.abspath(dlg.GetPath())
+            filename = Path(dlg.GetPath()).absolute().as_posix()
         dlg.Destroy()
 
         if filename is None:
@@ -1306,13 +1321,13 @@ class XRFDisplayFrame(wx.Frame):
         if not deffile.endswith('.mca'):
             deffile = deffile + '.mca'
 
-        _, deffile = os.path.split(deffile)
-        deffile = fix_filename(str(deffile))
+        deffile = fix_filename(Path(deffile).name)
         outfile = FileSave(self, "Save MCA File",
                            default_file=deffile,
                            wildcard=FILE_WILDCARDS)
         if outfile is not None:
             self.mca.save_mcafile(outfile)
+
 
     def onSaveColumnFile(self, event=None, **kws):
         deffile = ''
@@ -1328,8 +1343,7 @@ class XRFDisplayFrame(wx.Frame):
         if not deffile.endswith('.dat'):
             deffile = deffile + '.dat'
 
-        _, deffile = os.path.split(deffile)
-        deffile = fix_filename(str(deffile))
+        deffile = fix_filename(Path(deffile).name)
         ASCII_WILDCARDS = "Data File (*.dat)|*.dat|All files (*.*)|*.*"
         outfile = FileSave(self, "Save ASCII File for MCA Data",
                            default_file=deffile,
@@ -1358,6 +1372,10 @@ class XRFDisplayFrame(wx.Frame):
         """write a message to the Status Bar"""
         self.SetStatusText(s, panel)
 
+    def showInspectionTool(self, event=None):
+        app = wx.GetApp()
+        app.ShowInspectionTool()
+
     def onAbout(self, event=None):
         dlg = wx.MessageDialog(self,
                                """XRF Spectral Viewer
@@ -1370,7 +1388,7 @@ class XRFDisplayFrame(wx.Frame):
 
     def onReadFile(self, event=None):
         dlg = wx.FileDialog(self, message="Read MCA File",
-                            defaultDir=os.getcwd(),
+                            defaultDir=get_cwd(),
                             wildcard=FILE_WILDCARDS,
                             style=wx.FD_OPEN)
         path, re1ad = None, False
@@ -1381,20 +1399,15 @@ class XRFDisplayFrame(wx.Frame):
                 read = (wx.ID_YES == Popup(self, "Re-read file '%s'?" % path,
                                            'Re-read file?', style=wx.YES_NO))
         dlg.Destroy()
+        return path
 
-        if read:
-            try:
-                parent, fname = os.path.split(path)
-            except:
-                return
 
-class XRFApp(wx.App, wx.lib.mixins.inspection.InspectionMixin):
+class XRFApp(LarchWxApp):
     def __init__(self, filename=None, **kws):
         self.filename = filename
-        wx.App.__init__(self)
+        LarchWxApp.__init__(self, **kws)
 
-    def OnInit(self):
-        self.Init()
+    def createApp(self):
         frame = XRFDisplayFrame(filename=self.filename)
         frame.Show()
         self.SetTopWindow(frame)

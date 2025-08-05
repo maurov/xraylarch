@@ -10,27 +10,25 @@ Exposed functions here are
    imshow: display a false-color map from array data on
            a configurable Image Display Frame.
 '''
-
 import time
 import os
 import sys
 import wx
-
+from pathlib import Path
+from copy import deepcopy
 from wxmplot import PlotFrame, ImageFrame, StackedPlotFrame
+
 import larch
+from ..utils import mkdir
 from ..xrf import isLarchMCAGroup
 from ..larchlib import ensuremod
-from ..site_config import usr_larchdir
+from ..site_config import user_larchdir
 
 from .xrfdisplay import XRFDisplayFrame
 
-mpl_dir = os.path.join(usr_larchdir, 'matplotlib')
-os.environ['MPLCONFIGDIR'] = mpl_dir
-if not os.path.exists(mpl_dir):
-    try:
-        os.makedirs(mpl_dir)
-    except:
-        pass
+mplconfdir = Path(user_larchdir, 'matplotlib').as_posix()
+mkdir(mplconfdir)
+os.environ['MPLCONFIGDIR'] = mplconfdir
 
 from matplotlib.axes import Axes
 HIST_DOC = Axes.hist.__doc__
@@ -39,6 +37,14 @@ IMG_DISPLAYS = {}
 PLOT_DISPLAYS = {}
 FITPLOT_DISPLAYS = {}
 XRF_DISPLAYS = {}
+DISPLAY_LIMITS = None
+PLOTOPTS = {'theme': 'light',
+            'height': 550,
+            'width': 600,
+            'linewidth': 2.5,
+            'markersize': 4.0,
+            'show_grid': True,
+            'show_fullbox': True}
 
 _larch_name = '_plotter'
 
@@ -59,8 +65,8 @@ imshow           image display (false-color intensity image)
 xrf_plot         browsable display for XRF spectra
 '''
 
-MAX_WINDOWS = 20
-MAX_CURSHIST = 25
+MAX_WINDOWS = 25
+MAX_CURSHIST = 100
 
 class XRFDisplay(XRFDisplayFrame):
     def __init__(self, wxparent=None, window=1, _larch=None,
@@ -104,21 +110,20 @@ class XRFDisplay(XRFDisplayFrame):
 class PlotDisplay(PlotFrame):
     def __init__(self, wxparent=None, window=1, _larch=None, size=None, **kws):
         PlotFrame.__init__(self, parent=None, size=size,
-                           output_title='plot2d',
+                           output_title='larchplot',
                            exit_callback=self.onExit, **kws)
-
         self.Show()
         self.Raise()
         self.panel.cursor_callback = self.onCursor
         self.panel.cursor_mode = 'zoom'
         self.window = int(window)
+        self.get_config()
         self._larch = _larch
         self._xylims = {}
         self.cursor_hist = []
         self.symname = '%s.plot%i' % (_larch_name, self.window)
         symtable = ensuremod(self._larch, _larch_name)
         self.panel.canvas.figure.set_facecolor('#FDFDFB')
-
         if symtable is not None:
             symtable.set_symbol(self.symname, self)
             if not hasattr(symtable, '%s.cursor_maxhistory' % _larch_name):
@@ -150,6 +155,27 @@ class PlotDisplay(PlotFrame):
         if len(self.cursor_hist) > hmax:
             self.cursor_hist = self.cursor_hist[:hmax]
         symtable.set_symbol('%s_cursor_hist' % self.symname, self.cursor_hist)
+
+    def get_config(self):
+        global PLOTOPTS
+        try:
+            PLOTOPTS = deepcopy(_larch.symtable._sys.wx.plotopts)
+        except:
+            pass
+        self.config = {k: v for k, v in PLOTOPTS.items()}
+
+    def set_config(self,  **kws):
+        for k, v in kws.items():
+            if k in self.config:
+                self.config[k] = v
+        pconf = self.panel.conf
+        pconf.set_theme(theme=self.config['theme'])
+        pconf.enable_grid(self.config['show_grid'])
+        pconf.axes_style = 'box' if self.config['show_fullbox'] else 'open'
+        for i in range(16):
+            pconf.set_trace_linewidth(self.config['linewidth'], trace=i)
+            pconf.set_trace_markersize(self.config['markersize'], trace=i)
+        self.SetSize((int(self.config['width']), int(self.config['height'])))
 
 
 class StackedPlotDisplay(StackedPlotFrame):
@@ -248,13 +274,34 @@ class ImageDisplay(ImageFrame):
         if iy is not None:  set('%s_iy' % self.symname, iy)
         if val is not None: set('%s_val' % self.symname, val)
 
-def _getDisplay(win=1, _larch=None, wxparent=None, size=None,
-                wintitle=None, xrf=False, image=False, stacked=False):
+def get_display(win=1, _larch=None, wxparent=None, size=None, position=None,
+                wintitle=None, xrf=False, image=False, stacked=False,
+                theme=None, linewidth=None, markersize=None,
+                show_grid=None, show_fullbox=None, height=None,
+                width=None):
     """make a plotter"""
     # global PLOT_DISPLAYS, IMG_DISPlAYS
-    if (getattr(_larch.symtable._sys.wx, 'wxapp', None) is None or
-        getattr(_larch.symtable._plotter, 'no_plotting', False)):
-        return None
+    if  hasattr(_larch, 'symtable'):
+        if (getattr(_larch.symtable._sys.wx, 'wxapp', None) is None or
+            getattr(_larch.symtable._plotter, 'no_plotting', False)):
+            return None
+
+        global PLOTOPTS
+        try:
+            PLOTOPTS = deepcopy(_larch.symtable._sys.wx.plotopts)
+        except:
+            pass
+
+        global DISPLAY_LIMITS
+        if DISPLAY_LIMITS is None:
+            displays = [wx.Display(i) for i in range(wx.Display.GetCount())]
+            geoms = [d.GetGeometry() for d in displays]
+            _left = min([g.Left for g in geoms])
+            _right = max([g.Right for g in geoms])
+            _top = min([g.Top for g in geoms])
+            _bot = max([g.Bottom for g in geoms])
+            DISPLAY_LIMITS = [_left, _right, _top, _bot]
+
     win = max(1, min(MAX_WINDOWS, int(abs(win))))
     title   = 'Plot Window %i' % win
     symname = '%s.plot%i' % (_larch_name, win)
@@ -279,33 +326,109 @@ def _getDisplay(win=1, _larch=None, wxparent=None, size=None,
     if wintitle is not None:
         title = wintitle
 
-    def _get_disp(syname, creator, win, ddict, wxparent, size, _larch):
+    def _get_disp(symname, creator, win, ddict, wxparent,
+                  size, position, height, width, _larch):
+        wxapp = wx.GetApp()
+        display = None
+        new_display = False
         if win in ddict:
             display = ddict[win]
-        else:
-            display = _larch.symtable.get_symbol(symname, create=True)
-            if display is None:
-                display = creator(window=win, wxparent=wxparent,
-                                  size=size, _larch=_larch)
-            ddict[win] = display
-        return display
+            try:
+                s = display.GetSize()
+            except RuntimeError:  # window has been deleted
+                ddict.pop(win)
+                display = None
 
-    display = _get_disp(symname, creator, win, display_dict, wxparent,
-                        size, _larch)
+        if display is None and hasattr(_larch, 'symtable'):
+            display = _larch.symtable.get_symbol(symname, create=True)
+            if display is not None:
+                try:
+                    s = display.GetSize()
+                except RuntimeError:  # window has been deleted
+                    display = None
+
+        if display is None:
+            if size is None:
+                if height is None:
+                    height = PLOTOPTS['height']
+                if width is None:
+                    width = PLOTOPTS['width']
+                size = (int(width), int(height))
+            display = creator(window=win, wxparent=wxparent,
+                              size=size, _larch=_larch)
+            new_display = True
+            parent = wxapp.GetTopWindow()
+            if position is not None:
+                display.SetPosition(position)
+            elif parent is not None:
+                xpos, ypos = parent.GetPosition()
+                xsiz, ysiz = parent.GetSize()
+                x = xpos + xsiz*0.75
+                y = ypos + ysiz*0.75
+                if len(PLOT_DISPLAYS) > 0:
+                    try:
+                        xpos, ypos = PLOT_DISPLAYS[1].GetPosition()
+                        xsiz, ysiz = PLOT_DISPLAYS[1].GetSize()
+                    except:
+                        pass
+                off = 0.20*(win-1)
+                x = max(25, xpos + xsiz*off)
+                y = max(25, ypos + ysiz*off)
+                global DISPLAY_LIMITS
+                dlims = DISPLAY_LIMITS
+                if dlims is None:
+                    dlims = [0, 5000, 0, 5000]
+                if y+0.75*ysiz > dlims[3]:
+                    y = 40+max(40, 40+ysiz*(off-0.5))
+                if x+0.75*xsiz > dlims[1]:
+                    x = 20+max(10, 10+xpos+xsiz*(off-0.5))
+                display.SetPosition((int(x), int(y)))
+        ddict[win] = display
+        return display, new_display
+
+
+    display, isnew  = _get_disp(symname, creator, win, display_dict, wxparent,
+                                size, position, height, width, _larch)
+    if isnew and creator in (PlotDisplay, StackedPlotDisplay):
+        if theme is not None:
+            PLOTOPTS['theme'] = theme
+        if show_grid is not None:
+            PLOTOPTS['show_grid'] = show_grid
+        if show_fullbox is not None:
+            PLOTOPTS['show_fullbox'] = show_fullbox
+        if linewidth is not None:
+            PLOTOPTS['linewidth'] = linewidth
+        if markersize is not None:
+            PLOTOPTS['markersize'] = markersize
+        panels = [display.panel]
+        if creator == StackedPlotDisplay:
+            panels.append(display.panel_bot)
+        for panel in panels:
+            conf = panel.conf
+            conf.set_theme(theme=PLOTOPTS['theme'])
+            conf.enable_grid(PLOTOPTS['show_grid'])
+            conf.axes_style = 'box' if PLOTOPTS['show_fullbox'] else 'open'
+            for i in range(16):
+                conf.set_trace_linewidth(PLOTOPTS['linewidth'], trace=i)
+                conf.set_trace_markersize(PLOTOPTS['markersize'], trace=i)
     try:
         display.SetTitle(title)
+
     except:
         display_dict.pop(win)
-        display = _get_disp(symname, creator, win, display_dict, wxparent,
-                            size, _larch)
+        display, isnew = _get_disp(symname, creator, win, display_dict, wxparent,
+                                   size, position, _larch)
         display.SetTitle(title)
-        
-    _larch.symtable.set_symbol(symname, display)
+    if  hasattr(_larch, 'symtable'):
+        _larch.symtable.set_symbol(symname, display)
     return display
 
+
+_getDisplay = get_display # back compatibility
+
 def _xrf_plot(x=None, y=None, mca=None, win=1, new=True, as_mca2=False, _larch=None,
-              wxparent=None, size=None, side='left', force_draw=True, wintitle=None,
-              **kws):
+              wxparent=None, size=None, side=None, yaxes=1, force_draw=True,
+              wintitle=None,  **kws):
     """xrf_plot(energy, data[, win=1], options])
 
     Show XRF trace of energy, data
@@ -327,14 +450,13 @@ def _xrf_plot(x=None, y=None, mca=None, win=1, new=True, as_mca2=False, _larch=N
 
     See Also: xrf_oplot, plot
     """
-    plotter = _getDisplay(wxparent=wxparent, win=win, size=size,
+    plotter = get_display(wxparent=wxparent, win=win, size=size,
                           _larch=_larch, wintitle=wintitle, xrf=True)
     if plotter is None:
         return
     plotter.Raise()
     if x is None:
         return
-
 
     if isLarchMCAGroup(x):
         mca = x
@@ -379,7 +501,8 @@ def _xrf_oplot(x=None, y=None, mca=None, win=1, _larch=None, **kws):
     _xrf_plot(x=x, y=y, mca=mca, win=win, _larch=_larch, new=False, **kws)
 
 def _plot(x,y, win=1, new=False, _larch=None, wxparent=None, size=None,
-          xrf=False, stacked=False, force_draw=True, side='left', wintitle=None, **kws):
+          xrf=False, stacked=False, force_draw=True, side=None, yaxes=1,
+          wintitle=None, **kws):
     """plot(x, y[, win=1], options])
 
     Plot 2-D trace of x, y arrays in a Plot Frame, clearing any plot currently in the Plot Frame.
@@ -416,16 +539,18 @@ def _plot(x,y, win=1, new=False, _larch=None, wxparent=None, size=None,
 
     See Also: oplot, newplot
     """
-    plotter = _getDisplay(wxparent=wxparent, win=win, size=size,
+    plotter = get_display(wxparent=wxparent, win=win, size=size,
                           xrf=xrf, stacked=stacked,
-                          wintitle=wintitle,  _larch=_larch)
+                          wintitle=wintitle, _larch=_larch)
     if plotter is None:
         return
     plotter.Raise()
+    kws['side'] = side
+    kws['yaxes'] = yaxes
     if new:
-        plotter.plot(x, y, side=side, **kws)
+        plotter.plot(x, y, **kws)
     else:
-        plotter.oplot(x, y, side=side, **kws)
+        plotter.oplot(x, y, **kws)
     if force_draw:
         wx_update(_larch=_larch)
 
@@ -437,26 +562,25 @@ def _redraw_plot(win=1, xrf=False, stacked=False, size=None, wintitle=None,
     multiple plot()s with delay_draw=True
     """
 
-    plotter = _getDisplay(wxparent=wxparent, win=win, size=size,
+    plotter = get_display(wxparent=wxparent, win=win, size=size,
                           xrf=xrf, stacked=stacked,
                           wintitle=wintitle,  _larch=_larch)
     plotter.panel.unzoom_all()
 
 
 def _update_trace(x, y, trace=1, win=1, _larch=None, wxparent=None,
-                 side='left', redraw=False, **kws):
+                 side=None, yaxes=1, redraw=False, **kws):
     """update a plot trace with new data, avoiding complete redraw"""
-    plotter = _getDisplay(wxparent=wxparent, win=win, _larch=_larch)
+    plotter = get_display(wxparent=wxparent, win=win, _larch=_larch)
     if plotter is None:
         return
     plotter.Raise()
     trace -= 1 # wxmplot counts traces from 0
 
-    plotter.panel.update_line(trace, x, y, draw=True, side=side)
+    plotter.panel.update_line(trace, x, y, draw=True, side=side, yaxes=yaxes)
     wx_update(_larch=_larch)
 
 def wx_update(_larch=None, **kws):
-    _larch.symtable.set_symbol('_sys.wx.force_wxupdate', True)
     try:
         _larch.symtable.get_symbol('_sys.wx.ping')(timeout=0.002)
     except:
@@ -465,7 +589,7 @@ def wx_update(_larch=None, **kws):
 def _plot_setlimits(xmin=None, xmax=None, ymin=None, ymax=None, win=1, wxparent=None,
                     _larch=None):
     """set plot view limits for plot in window `win`"""
-    plotter = _getDisplay(wxparent=wxparent, win=win, _larch=_larch)
+    plotter = get_display(wxparent=wxparent, win=win, _larch=_larch)
     if plotter is None:
         return
     plotter.panel.set_xylims((xmin, xmax, ymin, ymax))
@@ -501,7 +625,7 @@ def _newplot(x, y, win=1, _larch=None, wxparent=None,  size=None, wintitle=None,
     _plot(x, y, win=win, size=size, new=True, _larch=_larch,
           wxparent=wxparent, wintitle=wintitle, **kws)
 
-def _plot_text(text, x, y, win=1, side='left', size=None,
+def _plot_text(text, x, y, win=1, side=None, yaxes=1, size=None,
                stacked=False, xrf=False, rotation=None, ha='left', va='center',
                _larch=None, wxparent=None,  **kws):
     """plot_text(text, x, y, win=1, options)
@@ -521,16 +645,16 @@ def _plot_text(text, x, y, win=1, side='left', size=None,
 
     See Also: plot, oplot, plot_arrow
     """
-    plotter = _getDisplay(wxparent=wxparent, win=win, size=size, xrf=xrf,
+    plotter = get_display(wxparent=wxparent, win=win, size=size, xrf=xrf,
                           stacked=stacked, _larch=_larch)
     if plotter is None:
         return
     plotter.Raise()
 
-    plotter.add_text(text, x, y, side=side,
+    plotter.add_text(text, x, y, side=side, yaxes=yaxes,
                      rotation=rotation, ha=ha, va=va, **kws)
 
-def _plot_arrow(x1, y1, x2, y2, win=1, side='left',
+def _plot_arrow(x1, y1, x2, y2, win=1, side=None, yaxes=1,
                 shape='full', color='black',
                 width=0.00, head_width=0.05, head_length=0.25,
                _larch=None, wxparent=None, stacked=False, xrf=False,
@@ -557,12 +681,12 @@ def _plot_arrow(x1, y1, x2, y2, win=1, side='left',
 
     See Also: plot, oplot, plot_text
     """
-    plotter = _getDisplay(wxparent=wxparent, win=win, size=size, xrf=xrf,
+    plotter = get_display(wxparent=wxparent, win=win, size=size, xrf=xrf,
                           stacked=stacked, _larch=_larch)
     if plotter is None:
         return
     plotter.Raise()
-    plotter.add_arrow(x1, y1, x2, y2, side=side, shape=shape,
+    plotter.add_arrow(x1, y1, x2, y2, side=side, yaxes=1, shape=shape,
                       color=color, width=width, head_length=head_length,
                       head_width=head_width, **kws)
 
@@ -583,7 +707,7 @@ def _plot_marker(x, y, marker='o', size=4, color='black', label='_nolegend_',
 
     See Also: plot, oplot, plot_text
     """
-    plotter = _getDisplay(wxparent=wxparent, win=win, size=None, xrf=xrf,
+    plotter = get_display(wxparent=wxparent, win=win, size=None, xrf=xrf,
                           stacked=stacked, _larch=_larch)
     if plotter is None:
         return
@@ -603,7 +727,7 @@ def _plot_axhline(y, xmin=0, xmax=1, win=1, wxparent=None, xrf=False,
         xmax:   ending x fraction (window units -- not user units!)
     See Also: plot, oplot, plot_arrow
     """
-    plotter = _getDisplay(wxparent=wxparent, win=win, size=size, xrf=xrf,
+    plotter = get_display(wxparent=wxparent, win=win, size=size, xrf=xrf,
                           stacked=stacked, _larch=_larch)
     if plotter is None:
         return
@@ -626,7 +750,7 @@ def _plot_axvline(x, ymin=0, ymax=1, win=1, wxparent=None, xrf=False,
         ymax:   ending y fraction (window units -- not user units!)
     See Also: plot, oplot, plot_arrow
     """
-    plotter = _getDisplay(wxparent=wxparent, win=win, size=size, xrf=xrf,
+    plotter = get_display(wxparent=wxparent, win=win, size=size, xrf=xrf,
                           stacked=stacked, _larch=_larch)
     if plotter is None:
         return
@@ -637,7 +761,7 @@ def _plot_axvline(x, ymin=0, ymax=1, win=1, wxparent=None, xrf=False,
     if not delay_draw:
         plotter.panel.canvas.draw()
 
-def _getcursor(win=1, timeout=30, _larch=None, wxparent=None, size=None,
+def _getcursor(win=1, timeout=15, _larch=None, wxparent=None, size=None,
                xrf=False, stacked=False, **kws):
     """get_cursor(win=1, timeout=30)
 
@@ -652,31 +776,29 @@ def _getcursor(win=1, timeout=30, _larch=None, wxparent=None, size=None,
     For a more consistent programmatic approach, this routine can be called
     with timeout <= 0 to read the most recently clicked cursor position.
     """
-    plotter = _getDisplay(wxparent=wxparent, win=win, size=size, xrf=xrf,
+    plotter = get_display(wxparent=wxparent, win=win, size=size, xrf=xrf,
                           stacked=stacked, _larch=_larch)
     if plotter is None:
         return
     symtable = ensuremod(_larch, _larch_name)
-    sentinal = '%s.plot%i_cursorflag' % (_larch_name, win)
     xsym = '%s.plot%i_x' % (_larch_name, win)
     ysym = '%s.plot%i_y' % (_larch_name, win)
 
     xval = symtable.get_symbol(xsym, create=True)
     yval = symtable.get_symbol(ysym, create=True)
-    symtable.set_symbol(sentinal, False)
-
-    def onChange(symbolname=None, **kws):
-        symtable.set_symbol(kws['sentinal'], True)
-
-    symtable.add_callback(xsym, onChange, kws={'sentinal': sentinal})
+    symtable.set_symbol(xsym, None)
 
     t0 = time.time()
     while time.time() - t0 < timeout:
         wx_update(_larch=_larch)
-        if symtable.get_symbol(sentinal):
+        time.sleep(0.05)
+        if symtable.get_symbol(xsym) is not None:
             break
-    symtable.del_symbol(sentinal)
-    symtable.clear_callbacks(xsym)
+
+    # restore value on timeout
+    if symtable.get_symbol(xsym, create=False) is None:
+        symtable.set_symbol(xsym, xval)
+
     return (symtable.get_symbol(xsym), symtable.get_symbol(ysym))
 
 def last_cursor_pos(win=None, _larch=None):
@@ -693,7 +815,10 @@ def last_cursor_pos(win=None, _larch=None):
     -------
     x, y coordinates of most recent cursor click, in user units
     """
-    plotter = _larch.symtable._plotter
+    if  hasattr(_larch, 'symtable'):
+        plotter = _larch.symtable._plotter
+    else:
+        return None, None
     histories = []
     for attr in dir(plotter):
         if attr.endswith('_cursor_hist'):
@@ -722,7 +847,7 @@ def _scatterplot(x,y, win=1, _larch=None, wxparent=None, size=None,
 
     See Also: plot, newplot
     """
-    plotter = _getDisplay(wxparent=wxparent, win=win, size=size, _larch=_larch)
+    plotter = get_display(wxparent=wxparent, win=win, size=size, _larch=_larch)
     if plotter is None:
         return
     plotter.Raise()
@@ -745,7 +870,7 @@ def _fitplot(x, y, y2=None, panel='top', label=None, label2=None, win=1,
 
     See Also: plot, newplot
     """
-    plotter = _getDisplay(wxparent=wxparent, win=win, size=size,
+    plotter = get_display(wxparent=wxparent, win=win, size=size,
                           stacked=True, _larch=_larch)
     if plotter is None:
         return
@@ -757,14 +882,16 @@ def _fitplot(x, y, y2=None, panel='top', label=None, label2=None, win=1,
         plotter.plot(x, y2-y, panel='bot')
         plotter.panel.conf.set_margins(top=0.15, bottom=0.01,
                                        left=0.15, right=0.05)
+        plotter.panel.unzoom_all()
         plotter.panel_bot.conf.set_margins(top=0.01, bottom=0.35,
                                            left=0.15, right=0.05)
+        plotter.panel_bot.unzoom_all()
 
 
 def _hist(x, bins=10, win=1, new=False,
            _larch=None, wxparent=None, size=None, force_draw=True,  *args, **kws):
 
-    plotter = _getDisplay(wxparent=wxparent, win=win, size=size, _larch=_larch)
+    plotter = get_display(wxparent=wxparent, win=win, size=size, _larch=_larch)
     if plotter is None:
         return
     plotter.Raise()
@@ -793,7 +920,7 @@ def _imshow(map, x=None, y=None, colormap=None, win=1, _larch=None,
 
     map: 2-dimensional array for map
     """
-    img = _getDisplay(wxparent=wxparent, win=win, size=size, _larch=_larch, image=True)
+    img = get_display(wxparent=wxparent, win=win, size=size, _larch=_larch, image=True)
     if img is not None:
         img.display(map, x=x, y=y, colormap=colormap, **kws)
 
@@ -811,16 +938,16 @@ def _saveplot(fname, dpi=300, format=None, win=1, _larch=None, wxparent=None,
               size=None, facecolor='w', edgecolor='w', quality=90,
               image=False, **kws):
     """formats: png (default), svg, pdf, jpeg, tiff"""
-    thisdir = os.path.abspath(os.curdir)
+    thisdir = Path.cwd().as_posix()
     if format is None:
-        pref, suffix = os.path.splitext(fname)
+        suffix = Path(fname).name
         if suffix is not None:
             if suffix.startswith('.'):
                 suffix = suffix[1:]
             format = suffix
     if format is None: format = 'png'
     format = format.lower()
-    canvas = _getDisplay(wxparent=wxparent, win=win, size=size,
+    canvas = get_display(wxparent=wxparent, win=win, size=size,
                          _larch=_larch, image=image).panel.canvas
     if canvas is None:
         return
@@ -844,4 +971,92 @@ def _closeDisplays(_larch=None, **kws):
     for display in (PLOT_DISPLAYS, IMG_DISPLAYS,
                     FITPLOT_DISPLAYS, XRF_DISPLAYS):
         for win in display.values():
-            win.Destroy()
+            try:
+                win.Destroy()
+            except:
+                pass
+
+def get_zoomlimits(plotpanel, dgroup):
+    """save current zoom limits, to be reapplied with set_zoomlimits()"""
+    view_lims = plotpanel.get_viewlimits()
+    zoom_lims = plotpanel.conf.zoom_lims
+    out = None
+    inrange = 3
+    if len(zoom_lims) > 0:
+        if zoom_lims[-1] is not None:
+            _ax =  list(zoom_lims[0].keys())[-1]
+            if all([_ax.get_xlabel() == dgroup.plot_xlabel,
+                    _ax.get_ylabel() == dgroup.plot_ylabel,
+                    min(dgroup.xplot) <= view_lims[1],
+                    max(dgroup.xplot) >= view_lims[0],
+                    min(dgroup.yplot) <= view_lims[3],
+                    max(dgroup.yplot) >= view_lims[2]]):
+                out = (_ax, view_lims, zoom_lims)
+    return out
+
+def set_zoomlimits(plotpanel, limits, verbose=False):
+    """set zoom limits returned from get_zoomlimits()"""
+    if limits is None:
+        if verbose:
+            print("set zoom, no limits")
+        return False
+    ax, vlims, zoom_lims = limits
+    plotpanel.reset_formats()
+    if ax == plotpanel.axes:
+        try:
+            ax.set_xlim((vlims[0], vlims[1]), emit=True)
+            ax.set_ylim((vlims[2], vlims[3]), emit=True)
+            if len(plotpanel.conf.zoom_lims) == 0 and len(zoom_lims) > 0:
+                plotpanel.conf.zoom_lims = zoom_lims
+                if verbose:
+                    print("set zoom, ", zoom_lims)
+        except:
+            if verbose:
+                print("set zoom, exception")
+            return False
+    return True
+
+def fileplot(filename, col1=1, col2=2, **kws):
+    """gnuplot-like plot of columns from a plain text column data file,
+
+    Arguments
+    ---------
+    filename, str:  name of file to be read with `read_ascii()`
+    col1,     int:  index of column (starting at 1) for x-axis [1]
+    col2,     int:  index of column (starting at 1) for y-axis [2]
+
+
+    Examples
+    --------
+       > fileplot('xmu.dat', 1, 4, new=True)
+
+    Notes
+    -----
+    1. Additional keywords arguments will be forwarded to `plot()`, including
+          new = True/False
+          title, xlabel, ylabel,
+          linewidth, marker, color
+    2. If discoverable, column labels will be used to label axes
+    """
+    from larch.io import read_ascii
+    fdat = read_ascii(filename)
+    ncols, npts = fdat.data.shape
+    ix = max(0, col1-1)
+    iy = max(0, col2-1)
+    xlabel = f"col {col1}"
+    flabel = f"col {col2}"
+    if ix < len(fdat.array_labels):
+        xlabel = fdat.array_labels[ix]
+    if iy < len(fdat.array_labels):
+        ylabel = fdat.array_labels[iy]
+
+    title = f"{filename:s} {col1:d}:{col2:d}"
+    if 'xlabel' in kws:
+        xlabel = kws.pop('xlabel')
+    if 'ylabel' in kws:
+        ylabel = kws.pop('ylabel')
+    if 'title' in kws:
+        title = kws.pop('title')
+
+    _plot(fdat.data[ix,:], fdat.data[iy,:], xlabel=xlabel, ylabel=ylabel,
+          title=title, **kws)

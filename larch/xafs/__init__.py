@@ -21,108 +21,56 @@ feffit           fit a set of Feff Paths to Feffit Datasets
 feffit_report    create a report from feffit() results
 '''
 
-from scipy import constants
 
 from .xafsutils import KTOE, ETOK, set_xafsGroup, etok, ktoe, guess_energy_units
 from .xafsft import xftf, xftr, xftf_fast, xftr_fast, ftwindow, xftf_prep
-from .pre_edge import pre_edge, preedge, find_e0, pre_edge_baseline, prepeaks_setup
-from .feffdat import FeffDatFile, FeffPathGroup, feffpath, path2chi, ff2chi
+from .pre_edge import pre_edge, preedge, find_e0, energy_align, find_energy_step
+from .prepeaks import prepeaks_setup, pre_edge_baseline, prepeaks_fit
+from .feffdat import FeffDatFile, FeffPathGroup, feffpath, path2chi, ff2chi, use_feffpath
 from .feffit import (FeffitDataSet, TransformGroup, feffit,
-                     feffit_dataset, feffit_transform, feffit_report)
+                     feffit_dataset, feffit_transform, feffit_report,
+                     propagate_uncertainties, feffit_conf_map)
 
-from .autobk import autobk
+from .autobk import autobk, autobk_lmfit, autobk_delta_chi
 from .mback import mback, mback_norm
 from .diffkk import diffkk, diffKKGroup
 from .fluo import fluo_corr
 
+## from .cif2feff import cif_sites, cif2feff6l
+
 from .feffrunner import FeffRunner, feffrunner, feff6l, feff8l, find_exe
 from .feff8lpath import feff8_xafs
-
-
+from .feffutils import get_feff_pathinfo
 
 from .cauchy_wavelet import cauchy_wavelet
 from .deconvolve import xas_convolve, xas_deconvolve
 from .estimate_noise import estimate_noise
 from .rebin_xafs import rebin_xafs, sort_xafs
-from .sigma2_models import sigma2_eins, sigma2_debye, sigma2_correldebye
+from .sigma2_models import sigma2_eins, sigma2_debye, sigma2_correldebye, gnxas
 
 
-
-####################################################
-## sigma2_eins and sigma2_debye are set here as
-## Procedures within lmfit's asteval (held in _sys.fiteval)
-## for calculating XAFS sigma2 for a scattering path
-## these use `reff` or `feffpath.geom` which will be updated
-## for each path during an XAFS path calculation
-##
-_sigma2_funcs = """
-def sigma2_eins(t, theta):
-    EINS_FACTOR = 1.e20*const_hbar**2/(2*const_kboltz*const_amu)
-
-    if feffpath is None:
-         return 0.
-
-    if theta < 1.e-5: theta = 1.e-5
-    if t < 1.e-5:     t = 1.e-5
-
-    rmass = 0.
-    for sym, iz, ipot, amass, x, y, z in feffpath.geom:
-        rmass = rmass + 1.0/max(0.1, amass)
-    rmass = 1.0/max(1.e-12, rmass)
-    return EINS_FACTOR/(theta * rmass * tanh(theta/(2.0*t)))
-
-def sigma2_debye(t, theta):
-    if feffpath is None:
-         return 0.
-
-    if theta < 1.e-5: theta = 1.e-5
-    if t < 1.e-5:     t = 1.e-5
-
-    tempk  = float(t)
-    thetad = float(theta)
-
-    natoms = len(feffpath.geom)
-    rnorm  = feffpath.rnorman
-    atomx, atomy, atomz, atomm = [], [], [], []
-    for sym, iz, ipot, am, x, y, z in feffpath.geom:
-        atomx.append(x)
-        atomy.append(y)
-        atomz.append(z)
-        atomm.append(am)
-
-    return sigma2_correldebye(natoms, tempk, thetad, rnorm,
-                              atomx, atomy, atomz, atomm)
-"""
 def _larch_init(_larch):
     """initialize xafs"""
-    # _larch.symtable._xafs.plotlabels  = xafsplots.plotlabels
-
-    fiteval_init = getattr(_larch.symtable._sys, 'fiteval_init', None)
-    if fiteval_init is None:
-        fiteval_init = _larch.symtable._sys.fiteval_init = []
-
-    add = fiteval_init.append
-    add(('const_hbar', constants.hbar))
-    add(('const_kboltz', constants.k))
-    add(('const_amu', constants.atomic_mass))
-    add(('sigma2_correldebye', sigma2_correldebye))
-    add(_sigma2_funcs)
-
     # initialize _xafs._feff_executable
-    feff6_exe = find_exe('feff6l')
-    _larch.symtable.set_symbol('_xafs._feff_executable', feff6_exe)
+    _larch.symtable.set_symbol('_xafs._feff_executable', find_exe('feff6l'))
+    _larch.symtable.set_symbol('_xafs._feff8_executable', find_exe('feff8l'))
 
 
 _larch_groups = (diffKKGroup, FeffRunner, FeffDatFile, FeffPathGroup,
                  TransformGroup, FeffitDataSet)
 
-_larch_builtins = {'_xafs': dict(autobk=autobk, etok=etok, ktoe=ktoe,
+_larch_builtins = {'_xafs': dict(autobk=autobk, autobk_lmfit=autobk_lmfit,
+                                 autobk_delta_chi=autobk_delta_chi,
+                                 etok=etok, ktoe=ktoe,
                                  guess_energy_units=guess_energy_units,
                                  diffkk=diffkk, xftf=xftf, xftr=xftr,
                                  xftf_prep=xftf_prep, xftf_fast=xftf_fast,
                                  xftr_fast=xftr_fast, ftwindow=ftwindow,
                                  find_e0=find_e0, pre_edge=pre_edge,
+                                 find_energy_step=find_energy_step,
+                                 energy_align=energy_align,
                                  prepeaks_setup=prepeaks_setup,
+                                 prepeaks_fit=prepeaks_fit,
                                  pre_edge_baseline=pre_edge_baseline,
                                  mback=mback, mback_norm=mback_norm,
                                  cauchy_wavelet=cauchy_wavelet,
@@ -132,12 +80,17 @@ _larch_builtins = {'_xafs': dict(autobk=autobk, etok=etok, ktoe=ktoe,
                                  estimate_noise=estimate_noise,
                                  rebin_xafs=rebin_xafs,
                                  sort_xafs=sort_xafs,
+                                 gnxas=gnxas,
                                  sigma2_eins=sigma2_eins,
                                  sigma2_debye=sigma2_debye, feffit=feffit,
                                  feffit_dataset=feffit_dataset,
                                  feffit_transform=feffit_transform,
                                  feffit_report=feffit_report,
+                                 feffit_conf_map=feffit_conf_map,
                                  feffrunner=feffrunner, feff6l=feff6l,
-                                 feff8l=feff8l, feffpath= feffpath,
+                                 feff8l=feff8l,
+                                 feffpath= feffpath,
+                                 use_feffpath= use_feffpath,
                                  path2chi=path2chi, ff2chi=ff2chi,
-                                 feff8_xafs=feff8_xafs)}
+                                 feff8_xafs=feff8_xafs,
+                                 get_feff_pathinfo=get_feff_pathinfo)}

@@ -12,9 +12,7 @@ import os
 from .. import Group
 
 # Default tau values for xspress3
-
-## XSPRESS3_TAUS = [109.e-9, 91.e-9, 99.e-9, 98.e-9]
-XSPRESS3_TAUS = [100.e-9, 100.e-9, 100.e-9, 100.e-9]
+XSPRESS3_TAU = 80.e-9
 
 def estimate_icr(ocr, tau, niter=3):
     "estimate icr from ocr and tau"
@@ -55,7 +53,7 @@ def get_counts_carefully(h5link):
     """
     # will usually succeed, of course.
     try:
-        return h5link[:]
+        return h5link[()]
     except OSError:
         pass
 
@@ -113,12 +111,11 @@ def get_counts_carefully(h5link):
 
 
 def read_xsp3_hdf5(fname, npixels=None, verbose=False,
-                   estimate_dtc=False, _larch=None):
-    # Reads a HDF5 file created with the DXP xMAP driver
-    # with the netCDF plugin buffers
+                   estimate_dtc=False, **kws):
+    # Reads a HDF5 file created with the Xspress3 driver
     npixels = None
 
-    clockrate = 12.5e-3   # microseconds per clock tick: 80MHz clock
+    clockrate = 12.5e-3  # microseconds per clock tick: 80MHz clock
     t0 = time.time()
     h5file = h5py.File(fname, 'r')
 
@@ -159,20 +156,9 @@ def read_xsp3_hdf5(fname, npixels=None, verbose=False,
     else:
         out.counts = counts
 
-    if estimate_dtc:
-        dtc_taus = XSPRESS3_TAUS
-        if _larch is not None and _larch.symtable.has_symbol('_sys.gsecars.xspress3_taus'):
-            dtc_taus = _larch.symtable._sys.gsecars.xspress3_taus
-
     for i in range(ndet):
-        chan = "CHAN%i" %(i+1)
-        clock_ticks = ndattr['%sSCA0' % chan].value
-        reset_ticks = ndattr["%sSCA1" % chan].value
-        all_events  = ndattr["%sSCA3" % chan].value
-        if "%sEventWidth" in ndattr:
-            event_width = 1.0 + ndattr['%sEventWidth' % chan].value
-        else:
-            event_width = 6.0
+        chan = f"CHAN{i+1}"
+        clock_ticks = ndattr[f'{chan}SCA0'][()]
 
         clock_ticks[np.where(clock_ticks<10)] = 10.0
         rtime = clockrate * clock_ticks
@@ -182,15 +168,30 @@ def read_xsp3_hdf5(fname, npixels=None, verbose=False,
         ocounts[np.where(ocounts<0.1)] = 0.1
         out.outputCounts[:, i] = ocounts
 
-        denom = clock_ticks - (all_events*event_width + reset_ticks)
-        denom[np.where(denom<2.0)] = 1.0
-        dtfactor = clock_ticks/denom
-        out.inputCounts[:, i] = dtfactor * ocounts
+        if f"{chan}DTFactor" in ndattr:
+            dtfactor = ndattr[f'{chan}DTFactor'][()]
+        else:
+            reset_ticks = 0.0*clock_ticks
+            all_events = 0.0*clock_ticks
+            event_width = 6.0
+            try:
+                reset_ticks = ndattr[f"{chan}SCA1"][()]
+            except:
+                pass
+            try:
+                all_events  = ndattr[f"{chan}SCA3"][()]
+            except:
+                pass
+            try:
+                event_width = 1.0 + ndattr[f'{chan}EventWidth'][()]
+            except:
+                pass
 
-        if estimate_dtc:
-            ocr = ocounts/(rtime*1.e-6)
-            icr = estimate_icr(ocr, dtc_taus[i], niter=3)
-            out.inputCounts[:, i] = icr * (rtime*1.e-6)
+            denom = clock_ticks - (all_events*event_width + reset_ticks)
+            denom[np.where(denom<2.0)] = 1.0
+            dtfactor = clock_ticks/denom
+
+        out.inputCounts[:, i] = dtfactor * ocounts
 
     h5file.close()
     t2 = time.time()

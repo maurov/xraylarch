@@ -1,20 +1,127 @@
 #!/usr/bin/env python
+import sys
+from traceback import format_tb
 import time
 from datetime import datetime
-from collections import OrderedDict
-import numpy as np
+from gzip import GzipFile
+import io
 import copy
 import json
+import logging
 
-from .paths import uname, bindir, nativepath, get_homedir
-from .debugtime import debugtime, debugtimer
+from charset_normalizer import from_bytes
 
-from .strutils import (fixName, isValidName, isNumber, bytes2str,
-                       fix_varname, isLiteralStr, strip_comments,
-                       find_delims, version_ge, unique_name)
+from pyshortcuts import (gformat, fix_filename, fix_varname, isotime,
+                         get_homedir, get_cwd, debugtimer, uname)
 
-from .shellutils import (_copy, _deepcopy, _more, _parent,
-                         _ls, _cd, _cwd, _mkdir)
+from .paths import bindir, unixpath, path_split
+
+from .strutils import (fixName, isValidName, isNumber, bytes2str, str2bytes,
+                       strip_quotes, isLiteralStr, strip_comments, asfloat,
+                       find_delims, version_ge, unique_name, get_sessionid,
+                       strict_ascii, file2groupname)
+
+from .shellutils import (_more, _parent, ls, cd, cwd, mkdir)
+
+logging.basicConfig(format='%(levelname)s [%(asctime)s]: %(message)s',
+                    datefmt='%Y-%m-%d %H:%M:%S', level=logging.WARNING)
+
+
+def getfloat_attr(obj, attr, length=11):
+    """Format an attribute of an object for printing."""
+    val = getattr(obj, attr, None)
+    if val is None:
+        return 'unknown'
+    if isinstance(val, int):
+        return f'{val}'
+    if isinstance(val, float):
+        return gformat(val, length=length).strip()
+    return repr(val)
+
+def format_exception(with_traceback=True):
+    """return exception message as list of strings,
+    optionally including traceback
+    """
+    etype, exc, tb = sys.exc_info()
+    out = []
+    if with_traceback:
+        out = ["Traceback (most recent calls last):"]
+        for tline in format_tb(tb):
+            if tline.endswith('\n'): tline = tline[:-1]
+            out.append(tline)
+        out.append('\n')
+    out.append(f"{etype.__name__}: {exc}")
+    return out
+
+
+def write_log(msg, level='debug'):
+    f = logging.debug
+    if level in ('warn', 'warning', logging.WARNING):
+        f = logging.warning
+    elif level in ('info', logging.INFO):
+        f = logging.info
+    elif level in ('error', logging.ERROR):
+        f = logging.error
+    elif level in ('critical', logging.CRITICAL):
+        f = logging.critical
+    return f(msg)
+
+def log_warning(msg):
+    return logging.warning(msg)
+
+def log_debug(msg):
+    return logging.debug(msg)
+
+def log_info(msg):
+    return logging.info(msg)
+
+def log_error(msg):
+    return logging.error(msg)
+
+def log_critical(msg):
+    return logging.critical(msg)
+
+
+def is_gzip(filename):
+    "is a file gzipped?"
+    with open(unixpath(filename), 'rb') as fh:
+        return fh.read(3) == b'\x1f\x8b\x08'
+    return False
+
+def read_textfile(filename, size=None):
+    """read text from a file as string
+
+    Argument
+    --------
+    filename  (str or file): name of file to read or file-like object
+    size  (int or None): number of bytes to read
+
+    Returns
+    -------
+    text of file as string.
+
+    Notes
+    ------
+    1. the encoding is detected with charset_normalizer.from_bytes
+       which is then used to decode bytes read from file.
+    2. line endings are normalized to be '\n', so that
+       splitting on '\n' will give a list of lines.
+    3. if filename is given, it can be a gzip-compressed file
+    """
+    text = ''
+
+    def decode(bytedata):
+        return str(from_bytes(bytedata).best())
+
+    if isinstance(filename, io.IOBase):
+        text = filename.read(size)
+        if filename.mode == 'rb':
+            text = decode(text)
+    else:
+        fopen = GzipFile if is_gzip(filename) else open
+        with fopen(unixpath(filename), 'rb') as fh:
+            text = decode(fh.read(size))
+    return text.replace('\r\n', '\n').replace('\r', '\n')
 
 
 def group2dict(group, _larch=None):
@@ -30,22 +137,11 @@ def copy_group(group, _larch=None):
     from larch import Group
     out = Group(datatype=getattr(group, 'datatype', 'unknown'),
                 copied_from=getattr(group, 'groupname', repr(group)))
-
-    class NoCopy:
-        c = 'no copy'
-        
     for attr in dir(group):
-        val = NoCopy
         try:
-            val = copy.deepcopy(getattr(group, attr))
-        except ValueError:
-            try:
-                val = copy.copy(getattr(group, attr))
-            except:
-                val = NoCopy
-        
-        if val != NoCopy:
-            setattr(out, attr, val)
+            setattr(out, attr, copy.deepcopy(getattr(group, attr)))
+        except:
+            print(f"cannot copy attribute {attr} from {group}")
     return out
 
 def copy_xafs_group(group, _larch=None):
@@ -55,38 +151,65 @@ def copy_xafs_group(group, _larch=None):
                 copied_from=getattr(group, 'groupname', repr(group)))
 
     for attr in dir(group):
-        do_copy = True
-        if attr in ('xdat', 'ydat', 'i0', 'data' 'yerr',
-                    'energy', 'mu'):
-            val = getattr(group, attr)*1.0
-        elif attr in ('norm', 'flat', 'deriv', 'deconv',
-                      'post_edge', 'pre_edge', 'norm_mback',
-                      'norm_vict', 'norm_poly'):
-            do_copy = False
-        else:
+        if attr not in ('norm', 'flat', 'deriv', 'deconv',
+                        'post_edge', 'pre_edge', 'norm_mback',
+                        'norm_vict', 'norm_poly'):
             try:
                 val = copy.deepcopy(getattr(group, attr))
+                setattr(out, attr, val)
             except ValueError:
-                do_copy = False
-        if do_copy:
-            setattr(out, attr, val)
+                pass
     return out
-   
 
-def isotime(t=None, with_tzone=False):
-    if t is None:
-        t = time.time()
-    sout = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t))
-    if with_tzone:
-        sout = "%s-%2.2i:00" % (sout, time.timezone/3600)
-    return sout
+def xisotime(dtime=None, timespec='seconds', sep=' '):
+    """return ISO format of current timestamp:
+          2024-04-27 17:31:12
+    """
+    if dtime is None:
+        dtime = datetime.now()
+    else:
+        if isinstance(dtime, (float, int)):
+            dtime = datetime.fromtimestamp(dtime)
+
+    return datetime.isoformat(dtime, timespec=timespec, sep=sep)
+
+def time_ago(timestamp, precision=2):
+    """
+    give a human-readable 'time ago' from the timestamp.
+
+    The output gives day, hours, minutes, seconds:
+       52 days, 1 hour
+
+    the `precision` field gives the number of significant time units to
+    show.  This defaults to 2:
+       'N days, H hours',
+       'N hours, M minutes'
+    """
+    def format(x, unit):
+        return "%d %s%s" % (x, unit, "s" if x > 1 else "")
+
+    tdiff = datetime.now() - datetime.fromtimestamp(timestamp)
+    days = tdiff.days
+    hours = tdiff.seconds//3600
+    minutes = tdiff.seconds%3600//60
+    seconds = tdiff.seconds%3600%60
+
+    out = []
+    if days > 0:
+        out.append(format(days, "day"))
+    if hours > 0:
+        out.append(format(hours, "hour"))
+    if minutes > 0:
+        out.append(format(minutes, "minute"))
+    out.append(format(seconds, "second"))
+    return ", ".join(out[:precision])
 
 def json_dump(data, filename):
     """
     dump object or group to file using json
     """
     from .jsonutils import encode4js
-    with open(filename, 'w') as fh:
+    with open(unixpath(filename), 'w') as fh:
         fh.write(json.dumps(encode4js(data)))
         fh.write('\n')
 
@@ -95,8 +218,8 @@ def json_load(filename):
     load object from json dump file
     """
     from .jsonutils import decode4js
-    with open(filename, 'r') as fh:
-        data = fh.read()
+    with open(unixpath(filename), 'rb') as fh:
+        data = fh.read().decode('utf-8')
     return decode4js(json.loads(data))
 
 def _larch_init(_larch):
@@ -107,10 +230,13 @@ def _larch_init(_larch):
                                                      text2={'color': 'blue'},
                                                      error={'color': 'red'}))
 
-_larch_builtins = dict(copy=_copy, deepcopy=_deepcopy, more= _more,
-                       parent=_parent, ls=_ls, mkdir=_mkdir, cd=_cd,
-                       cwd=_cwd, group2dict=group2dict,
+_larch_builtins = dict(copy=copy.copy, deepcopy=copy.deepcopy, more= _more,
+                       parent=_parent, ls=ls, mkdir=mkdir, cd=cd,
+                       cwd=cwd, group2dict=group2dict,
                        copy_group=copy_group, copy_xafs_group=copy_xafs_group,
                        dict2group=dict2group, debugtimer=debugtimer,
                        isotime=isotime, json_dump=json_dump,
-                       json_load=json_load)
+                       json_load=json_load, gformat=gformat,
+                       fix_filename=fix_filename,
+                       fix_varname=fix_varname,
+                       strip_quotes=strip_quotes)

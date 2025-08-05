@@ -9,37 +9,20 @@ CURDIR = os.path.abspath(os.path.dirname(__file__))
 
 sys.path.insert(0, os.path.abspath(os.path.join('sphinx', 'ext')))
 sys.path.insert(0, CURDIR)
+sys.path.append(os.path.abspath(os.path.join('.')))
+
+from extensions import extensions
 
 import authorlist_format
 
-# from sphinxtr
-# import html_mods
-# import latex_mods
-
-# -- General configuration -----------------------------------------------------
-
-# Add any Sphinx extension module names here, as strings. They can be extensions
-# coming with Sphinx (named 'sphinx.ext.*') or your custom ones.
-extensions = ['sphinx.ext.autodoc',
-              'sphinx.ext.extlinks',
-              'sphinx.ext.mathjax',
-              'sphinx.ext.ifconfig',
-              'sphinx.ext.intersphinx',
-              'sphinx.ext.napoleon',
-              'sphinxcontrib.bibtex',
-              'sphinxcontrib.argdoc', 'subfig']
-
-# extensions.extend(['fix_equation_ref', 'subfig', 'figtable', 'numsec',
-#                    'singlehtml_toc', 'singletext'])
-
 intersphinx_mapping = {'py':    ('https://docs.python.org/3', None),
-                       'numpy': ('https://docs.scipy.org/doc/numpy/', None),
-                       'scipy': ('https://docs.scipy.org/doc/scipy/reference/', None),
+                       'numpy': ('https://numpy.org/doc/stable/', None),
+                       'scipy': ('https://docs.scipy.org/doc/scipy/', None),
                        }
 
 extlinks = {
-    'scipydoc' : ('http://docs.scipy.org/doc/scipy/reference/generated/scipy.%s.html', 'scipy.'),
-    'numpydoc' : ('http://docs.scipy.org/doc/numpy/reference/generated/numpy.%s.html', 'numpy.'),
+    'scipydoc' : ('https://docs.scipy.org/doc/scipy/reference/generated/scipy.%s.html', 'scipy.'),
+    'numpydoc' : ('https://docs.scipy.org/doc/numpy/reference/generated/numpy.%s.html', 'numpy.'),
     'lmfitdoc' : ('https://lmfit.github.io/lmfit-py/%s.html', 'lmfit.'),
     'lmfitx' : ('https://lmfit.github.io/lmfit-py/%s', ' '),
     }
@@ -60,7 +43,7 @@ master_doc = 'index'
 # General information about the project.
 project = 'xraylarch'
 author = 'Matthew Newville'
-copyright = 'Matthew Newville, The University of Chicago, 2020'
+copyright = 'Matthew Newville, The University of Chicago, 2022'
 
 numfig = True
 numfig_secnum_depth = 3
@@ -69,6 +52,7 @@ numfig_format = {'figure': 'Figure %s',
                  'code-block': 'Listing %s',
                  'section': 'Section %s'}
 
+bibtex_bibfiles = ['larch.bib']
 
 # The version info for the project you're documenting, acts as replacement for
 # |version| and |release|, also used in various other places throughout the
@@ -77,7 +61,7 @@ numfig_format = {'figure': 'Figure %s',
 # The short X.Y version.
 try:
     import larch
-    release = larch.__version__
+    release = larch.__release_version__
 # The full version, including alpha/beta/rc tags.
 except ImportError:
     release = 'unknown (larch import failed??)'

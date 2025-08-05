@@ -1,17 +1,23 @@
 #!/usr/bin/env python
 #
-from __future__ import print_function
+
 import sys
 import os
+import time
 from functools import partial
+from pathlib import Path
 import wx
+import wx.lib.mixins.inspection
+
 import numpy
 import scipy
-
 import larch
+from larch.interpreter import Interpreter
+from pyshortcuts import uname, get_cwd, fix_varname
 
-from wxutils import (MenuItem, Font, Button, Choice)
+from wxutils import (MenuItem, Font, Button, Choice, panel_pack)
 
+from .gui_utils import LarchWxApp
 from .readlinetextctrl import ReadlineTextCtrl
 from .larchfilling import Filling
 from .columnframe import ColumnDataFileFrame
@@ -19,18 +25,31 @@ from .athena_importer import AthenaImporter
 from . import inputhook
 
 from larch.io import (read_ascii, read_xdi, read_gsexdi,
-                      gsescan_group, fix_varname,
-                      is_athena_project, AthenaProject)
-from larch.version import make_banner
+                      gsescan_group, is_athena_project, AthenaProject)
+from larch.version import make_banner, version_data
 
 FILE_WILDCARDS = "Data Files(*.0*,*.dat,*.xdi)|*.0*;*.dat;*.xdi|All files (*.*)|*.*"
 
 ICON_FILE = 'larch.ico'
+BACKGROUND_COLOUR = '#FCFCFA'
+FOREGROUND_COLOUR = '#050520'
+
+FONTSIZE_FW = 14
+if uname == 'win':
+    FONTSIZE_FW = 12
+elif uname == 'darwin':
+    FONTSIZE_FW = 14
 
 def makeColorPanel(parent, color):
     p = wx.Panel(parent, -1)
     p.SetBackgroundColour(color)
     return p
+
+def wx_inspect():
+    wx.GetApp().ShowInspectionTool()
+
+def get_font(size):
+    return wx.Font(size, wx.FONTFAMILY_SWISS, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD)
 
 class LarchWxShell(object):
     ps1 = 'Larch>'
@@ -39,20 +58,17 @@ class LarchWxShell(object):
                  prompt=None, historyfile=None, output=None, input=None):
         self._larch = _larch
         self.textstyle = None
-
+        self.parent = wxparent
         self.prompt = prompt
         self.input  = input
         self.output = output
 
         if _larch is None:
-            self._larch  = larch.Interpreter(historyfile=historyfile,
+            self._larch  = Interpreter(historyfile=historyfile,
                                              writer=self)
             self._larch.run_init_scripts()
         self.writer  = self._larch.writer
         self.symtable = self._larch.symtable
-        # if self.output is not None:
-        #    self.encoding = sys.stdout.encoding
-        #    sys.stdout = self
 
         self.objtree = wxparent.objtree
 
@@ -64,21 +80,24 @@ class LarchWxShell(object):
         self.symtable.set_symbol('_sys.wx.inputhook',   inputhook)
         self.symtable.set_symbol('_sys.wx.ping',   inputhook.ping)
         self.symtable.set_symbol('_sys.wx.force_wxupdate', False)
-        self.symtable.set_symbol('_sys.wx.wxapp', output)
+        self.symtable.set_symbol('_sys.wx.wx_inspect', wx_inspect)
+        self.symtable.set_symbol('_sys.wx.wxapp', wx.GetApp())
         self.symtable.set_symbol('_sys.wx.parent', wx.GetApp().GetTopWindow())
+        self.symtable.set_symbol('_sys.last_eval_time', 0.0)
+        self.fontsize = FONTSIZE_FW
 
         if self.output is not None:
             style = self.output.GetDefaultStyle()
             bgcol = style.GetBackgroundColour()
             sfont = style.GetFont()
-
+            sfont.Family = wx.TELETYPE
+            sfont.Weight = wx.BOLD
+            sfont.PointSize = self.fontsize
+            style.SetFont(sfont)
+            self.output.SetDefaultStyle(style)
             self.textstyle = wx.TextAttr('black', bgcol, sfont)
 
         self.SetPrompt(True)
-        self.flush_timer = wx.Timer(wxparent)
-        self.needs_flush = True
-        wxparent.Bind(wx.EVT_TIMER, self.onFlushTimer, self.flush_timer)
-        self.flush_timer.Start(500)
 
     def onUpdate(self, event=None):
         symtable = self.symtable
@@ -105,12 +124,16 @@ class LarchWxShell(object):
         if self.output is None:
             return
 
-        display_colors = self._larch.symtable._sys.display.colors
+        display_colors = self.symtable._sys.display.colors
+
         textattrs = display_colors.get(mode, {'color':'black'})
         color = textattrs['color']
+
         style = self.output.GetDefaultStyle()
-        bgcol = style.GetBackgroundColour()
-        sfont = style.GetFont()
+        bgcol = BACKGROUND_COLOUR
+        sfont = self.output.GetFont()
+        style.SetFont(sfont)
+        self.output.SetDefaultStyle(style)
         self.textstyle = wx.TextAttr(color, bgcol, sfont)
 
     def write_sys(self, text):
@@ -131,8 +154,9 @@ class LarchWxShell(object):
             self.output.WriteText(text)
             pos1 = self.output.GetLastPosition()
             self.output.SetStyle(pos0, pos1, self.textstyle)
-            self.output.EmulateKeyPress(wx.KeyEvent())
-            self.input.SetFocus()
+            self.output.SetInsertionPoint(pos1)
+        self.output.Refresh()
+        wx.CallAfter(self.input.SetFocus)
 
     def flush(self, *args):
         self.output.Refresh()
@@ -159,7 +183,7 @@ class LarchWxShell(object):
             return
         else:
             if add_history:
-                self.input.AddToHistory(text)
+                self.parent.AddToHistory(text)
                 self.write("%s\n" % text)
             ret = self._larch.eval(text, add_history=add_history)
             if self._larch.error:
@@ -173,50 +197,64 @@ class LarchWxShell(object):
                 self.objtree.onRefresh()
             except ValueError:
                 pass
+            self.symtable._sys.last_eval_time = time.time()
             self.SetPrompt(self._larch.input.complete)
+            return ret
 
 class LarchPanel(wx.Panel):
     """Larch Input/Output Panel + Data Viewer as a wx.Panel,
     suitable for embedding into apps
     """
-    def __init__(self,  parent=None, _larch=None,
+    def __init__(self,  parent=None, _larch=None, font=None,
                  historyfile='history_larchgui.lar', **kwds):
         self.parent = parent
-        if not historyfile.startswith(larch.site_config.usr_larchdir):
-            historyfile = os.path.join(larch.site_config.usr_larchdir,
-                                       historyfile)
+        if not historyfile.startswith(larch.site_config.user_larchdir):
+            historyfile = Path(larch.site_config.user_larchdir,
+                                       historyfile).as_posix()
 
         wx.Panel.__init__(self, parent, -1, size=(750, 725))
 
         self.splitter = splitter = wx.SplitterWindow(self, style=wx.SP_LIVE_UPDATE)
         splitter.SetMinimumPaneSize(150)
-        self.SetBackgroundColour('#E9EEE0')
 
-        self.objtree = Filling(splitter,  rootLabel='_main')
+        self.objtree = Filling(splitter,  rootLabel='_main',
+                               fgcol=FOREGROUND_COLOUR, bgcol=BACKGROUND_COLOUR)
 
         self.output = wx.TextCtrl(splitter, -1,  '',
                                   style=wx.TE_MULTILINE|wx.TE_RICH|wx.TE_READONLY)
 
+        self.output.SetBackgroundColour(BACKGROUND_COLOUR)
+        self.output.SetForegroundColour(FOREGROUND_COLOUR)
+        if font is None:
+            font = get_font(self.fontsize)
+
+        self.output.SetFont(font)
+        self.objtree.tree.SetFont(font)
+        self.objtree.text.SetFont(font)
+
         self.output.CanCopy()
         self.output.SetInsertionPointEnd()
-        # self.output.SetDefaultStyle(wx.TextAttr('black', 'white', sfont))
+        splitter.SplitHorizontally(self.objtree, self.output, 0)
 
-        splitter.SplitHorizontally(self.objtree, self.output, 0.5)
+        ipanel = wx.Panel(self)
 
-        ipanel = wx.Panel(self, -1)
-
-        self.prompt = wx.StaticText(ipanel, -1, 'Larch>', size=(65,-1),
+        self.prompt = wx.StaticText(ipanel, label='Larch>', size=(75,-1),
                                     style=wx.ALIGN_CENTER|wx.ALIGN_RIGHT)
 
-        self.input = ReadlineTextCtrl(ipanel, -1,  '', size=(525,-1),
-                                      historyfile=historyfile,
-                                      style=wx.ALIGN_LEFT|wx.TE_PROCESS_ENTER)
+        self.input = wx.TextCtrl(ipanel, value='', size=(525,-1),
+                                 style=wx.TE_LEFT|wx.TE_PROCESS_ENTER)
 
         self.input.Bind(wx.EVT_TEXT_ENTER, self.onText)
+        if uname == 'darwin':
+            self.input.Bind(wx.EVT_KEY_UP,  self.onChar)
+        else:
+            self.input.Bind(wx.EVT_CHAR,  self.onChar)
+
+        self.hist_buff = []
+        self.hist_mark = 0
+
         isizer = wx.BoxSizer(wx.HORIZONTAL)
         isizer.Add(self.prompt,  0, wx.BOTTOM|wx.CENTER)
-
-        ## isizer.Add(self.input,   1, wx.ALIGN_LEFT|wx.ALIGN_CENTER|wx.EXPAND)
         isizer.Add(self.input,   1, wx.ALIGN_LEFT|wx.EXPAND)
 
         ipanel.SetSizer(isizer)
@@ -236,12 +274,17 @@ class LarchPanel(wx.Panel):
                                        input  = self.input)
 
         self.objtree.SetRootObject(self.larchshell.symtable)
+
+        self.output.SetInsertionPointEnd()
+        # root = self.objtree.tree.GetRootItem()
+
+
+    def write_banner(self):
         self.larchshell.set_textstyle('text2')
-        self.larchshell.write(make_banner([wx]))
+        self.larchshell.write(make_banner(show_libraries=['numpy', 'scipy', 'matplotlib', 'h5py',
+                                                          'lmfit', 'xraydb', 'wx','wxmplot']))
         self.larchshell.write("\n  \n")
         self.larchshell.set_textstyle('text')
-        root = self.objtree.tree.GetRootItem()
-        self.objtree.tree.Expand(root)
 
     def update(self):
         self.objtree.onRefresh()
@@ -250,27 +293,63 @@ class LarchPanel(wx.Panel):
         text =  event.GetString()
         self.input.Clear()
         if text.lower() in ('quit', 'exit', 'quit()', 'exit()'):
-            self.parent.onExit()
+            if self.parent.exit_on_close:
+                self.parent.onExit()
         else:
             wx.CallAfter(self.larchshell.eval, text)
+
+    def onChar(self, event=None):
+        key = event.GetKeyCode()
+
+        entry  = self.input.GetValue().strip()
+        pos = self.input.GetSelection()
+        ctrl = event.ControlDown()
+
+        if key == wx.WXK_RETURN and len(entry) > 0:
+            pass
+        if key in (wx.WXK_UP, wx.WXK_DOWN):
+            if key == wx.WXK_UP:
+                self.hist_mark = max(0, self.hist_mark-1)
+            else:
+                self.hist_mark += 1
+            try:
+                wx.CallAfter(self.set_input_text, self.hist_buff[self.hist_mark])
+            except IndexError:
+                wx.CallAfter(self.set_input_text, '')
+        event.Skip()
+
+    def set_input_text(self, text):
+        self.input.SetValue(text)
+        self.input.SetFocus()
+        self.input.SetInsertionPointEnd()
+
+
+    def AddToHistory(self, text=''):
+        for tline in text.split('\n'):
+            if len(tline.strip()) > 0:
+                self.hist_buff.append(tline)
+                self.hist_mark = len(self.hist_buff)
+
 
 class LarchFrame(wx.Frame):
     def __init__(self, parent=None, _larch=None, is_standalone=True,
                  historyfile='history_larchgui.lar', with_inspection=False,
-                 exit_on_close=False, **kwds):
+                 exit_on_close=False, with_raise=True, **kwds):
 
         self.is_standalone = is_standalone
         self.with_inspection = with_inspection
+        self.exit_on_close = exit_on_close
         self.parent = parent
         self.historyfile = historyfile
         self.subframes = {}
         self.last_array_sel = {}
+        self.fontsize = FONTSIZE_FW
 
-        wx.Frame.__init__(self, parent, -1, size=(750, 725),
+        wx.Frame.__init__(self, parent, -1, size=(800, 725),
                           style= wx.DEFAULT_FRAME_STYLE)
         self.SetTitle('LarchGUI')
 
-        self.font = wx.Font(12, wx.SWISS, wx.NORMAL, wx.BOLD, 0, "")
+        self.font = get_font(self.fontsize)
         self.SetFont(self.font)
         sbar = self.CreateStatusBar(2, wx.CAPTION)
 
@@ -278,7 +357,8 @@ class LarchFrame(wx.Frame):
         self.SetStatusText("Larch initializing...", 0)
 
         self.mainpanel = LarchPanel(parent=self, _larch=_larch,
-                                    historyfile=historyfile)
+                                    historyfile=historyfile,
+                                    font=self.font)
 
         self.larchshell = self.mainpanel.larchshell
         self._larch = self.larchshell._larch
@@ -289,22 +369,22 @@ class LarchFrame(wx.Frame):
 
         self.SetSizer(sizer)
 
-        if parent is None and exit_on_close:
-            self.Bind(wx.EVT_CLOSE,  self.onExit)
-        else:
-             self.Bind(wx.EVT_CLOSE,  self.onClose)
         self.Bind(wx.EVT_SHOW, self.onShow)
         self.BuildMenus()
-
+        self.onSelectFont(fsize=self.fontsize)
         # larchdir = larch.site_config.larchdir
 
-        fico = os.path.join(larch.site_config.icondir, ICON_FILE)
-        if os.path.exists(fico):
-            self.SetIcon(wx.Icon(fico, wx.BITMAP_TYPE_ICO))
+        fico = Path(larch.site_config.icondir, ICON_FILE).absolute()
+        if fico.exists():
+            self.SetIcon(wx.Icon(fico.as_posix(), wx.BITMAP_TYPE_ICO))
+        self.mainpanel.write_banner()
+        if with_raise:
+            self.Raise()
 
-        self.Refresh()
+    def Raise(self):
         self.SetStatusText("Ready", 0)
-        self.Raise()
+        self.Refresh()
+        wx.Frame.Raise(self)
 
     def BuildMenus(self):
         menuBar = wx.MenuBar()
@@ -321,16 +401,20 @@ class LarchFrame(wx.Frame):
                  'Change Directory', self.onChangeDir)
         MenuItem(self, fmenu, 'Clear Input\tCtrl+D',
                  'Clear Input', self.onClearInput)
-        MenuItem(self, fmenu, 'Select Font\tCtrl+F',
-                 'Select Font', self.onSelectFont)
 
         if self.with_inspection:
             MenuItem(self, fmenu, 'Show wxPython Inspector\tCtrl+I',
                      'Debug wxPython App', self.onWxInspect)
         fmenu.AppendSeparator()
-        MenuItem(self, fmenu, 'Close Display', 'Close display', self.onClose)
-        if self.parent is None:
-            MenuItem(self, fmenu, 'E&xit', 'End program', self.onExit)
+
+        if self.parent is None and self.exit_on_close:
+            self.Bind(wx.EVT_CLOSE,  self.onExit)
+            MenuItem(self, fmenu, 'E&xit', 'End program',
+                     self.onExit)
+        else:
+            self.Bind(wx.EVT_CLOSE,  self.onClose)
+            MenuItem(self, fmenu, 'Close Display',
+                     'Close display', self.onClose)
 
         menuBar.Append(fmenu, '&File')
 
@@ -346,23 +430,44 @@ class LarchFrame(wx.Frame):
                                  name=appname, creator=creator))
             menuBar.Append(appmenu, 'Applications')
 
+        fsmenu = wx.Menu()
+        self.fontsizes = {}
+        for fsize in (10, 11, 12, 13, 14, 15, 16, 18, 20, 22, 24):
+            m = MenuItem(self, fsmenu,  "%d" % fsize, "%d" % fsize,
+                         self.onSelectFont, kind=wx.ITEM_RADIO)
+            self.fontsizes[m.GetId()] = fsize
+            if fsize == self.fontsize:
+                m.Check()
+
+        menuBar.Append(fsmenu, 'Font Size')
+
         hmenu = wx.Menu()
         MenuItem(self, hmenu, '&About',
                  'Information about this program',  self.onAbout)
+        MenuItem(self, hmenu, '&Versions',
+                 'Show versions of Larch and libraries',  self.onVersions)
         menuBar.Append(hmenu, '&Help')
         self.SetMenuBar(menuBar)
 
-    def onSelectFont(self, event=None):
-        fdata = wx.FontData()
-        fdata.SetInitialFont(self.font)
-        dlg = wx.FontDialog(self, fdata)
-        if dlg.ShowModal() == wx.ID_OK:
-            self.font = dlg.GetFontData().GetChosenFont()
-            self.SetFont(self.font)
-            self.mainpanel.output.SetFont(self.font)
-            self.mainpanel.objtree.SetFont(self.font)
-            self.mainpanel.objtree.text.SetFont(self.font)
-        dlg.Destroy()
+    def onSelectFont(self, event=None, fsize=None):
+        if fsize is None:
+            fsize = self.fontsizes.get(event.GetId(), self.fontsize)
+        self.fontsize = fsize
+
+        def set_fontsize(obj, fsize):
+            fn = obj.GetFont()
+            f1, f2 = fn.PixelSize
+            fn.SetPixelSize(wx.Size(int((f1*fsize/f2)), fsize))
+            obj.SetFont(fn)
+
+        self.PointSize = fsize
+        set_fontsize(self, fsize)
+        set_fontsize(self.mainpanel.output,  fsize)
+        set_fontsize(self.mainpanel.objtree.tree, fsize)
+        set_fontsize(self.mainpanel.objtree.text, fsize)
+        self.mainpanel.objtree.text.fontsize = fsize
+
+
 
     def onWxInspect(self, event=None):
         wx.GetApp().ShowInspectionTool()
@@ -395,12 +500,12 @@ class LarchFrame(wx.Frame):
     def onReadData(self, event=None):
         wildcard = 'Data file (*.dat)|*.dat|All files (*.*)|*.*'
         dlg = wx.FileDialog(self, message='Open Data File',
-                            defaultDir=os.getcwd(),
+                            defaultDir=get_cwd(),
                             wildcard=FILE_WILDCARDS,
                             style=wx.FD_OPEN|wx.FD_CHANGE_DIR)
         path = None
         if dlg.ShowModal() == wx.ID_OK:
-            path = os.path.abspath(dlg.GetPath()).replace('\\', '/')
+            path = Path(dlg.GetPath()).absolute().as_posix()
         dlg.Destroy()
 
         if path is None:
@@ -411,7 +516,7 @@ class LarchFrame(wx.Frame):
                                creator=AthenaImporter,
                                read_ok_cb=self.onReadAthenaProject_OK)
         else:
-            filedir, filename = os.path.split(path)
+            filename = Path(path).fname
             pref = fix_varname((filename + '_'*8)[:8]).replace('.', '_').lower()
 
             count, maxcount = 1, 9999
@@ -455,7 +560,7 @@ class LarchFrame(wx.Frame):
         read_cmd = "_prj = read_athena('{path:s}', do_fft=False, do_bkg=False)"
         self.larchshell.eval(read_cmd.format(path=path))
         dgroup = None
-        script = "{group:s} = extract_athenagroup(_prj.{prjgroup:s})"
+        script = "{group:s} = _prj.{prjgroup:s}"
         for gname in namelist:
             this = getattr(self.larchshell.symtable._prj, gname)
             gid = str(getattr(this, 'athena_id', gname))
@@ -468,9 +573,9 @@ class LarchFrame(wx.Frame):
                             wildcard=wildcard,
                             style=wx.FD_OPEN|wx.FD_CHANGE_DIR)
         if dlg.ShowModal() == wx.ID_OK:
-            fout = os.path.abspath(dlg.GetPath())
-            path, fname = os.path.split(fout)
-            os.chdir(path)
+            fout = Path(dlg.GetPath()).absolute()
+            fname = fout.name
+            os.chdir(fout.parent)
             text = "run('%s')" % fname
             self.larchshell.write("%s\n" % text)
             wx.CallAfter(self.larchshell.eval, text)
@@ -484,7 +589,7 @@ class LarchFrame(wx.Frame):
                             defaultFile=deffile,
                             style=wx.FD_SAVE|wx.FD_CHANGE_DIR)
         if dlg.ShowModal() == wx.ID_OK:
-            fout = os.path.abspath(dlg.GetPath())
+            fout = Path(dlg.GetPath()).absolute().as_posix()
             self._larch.input.history.save(fout, session_only=True)
             self.SetStatusText("Wrote %s" % fout, 0)
         dlg.Destroy()
@@ -493,31 +598,51 @@ class LarchFrame(wx.Frame):
         text =  event.GetString()
         self.larchshell.write("%s\n" % text)
         self.input.Clear()
-        if text.lower() in ('quit', 'exit'):
-            self.onExit()
+        if text.lower() in ('quit', 'exit', 'quit()', 'exit()'):
+            if self.exit_on_close:
+                self.onExit()
         else:
-            self.input.AddToHistory(text)
+            self.panel.AddToHistory(text)
             wx.CallAfter(self.larchshell.eval, text)
-
 
     def onChangeDir(self, event=None):
         dlg = wx.DirDialog(None, 'Choose a Working Directory',
-                           defaultPath = os.getcwd(),
+                           defaultPath = get_cwd(),
                            style = wx.DD_DEFAULT_STYLE)
 
         if dlg.ShowModal() == wx.ID_OK:
             os.chdir(dlg.GetPath())
         dlg.Destroy()
-        return os.getcwd()
+        return get_cwd()
 
     def onAbout(self, event=None):
         about_msg =  """LarchGui:
-        %s""" % (make_banner([wx]))
+        %s""" % (make_banner(withlibraries=True))
 
         dlg = wx.MessageDialog(self, about_msg,
                                "About LarchGui", wx.OK | wx.ICON_INFORMATION)
         dlg.ShowModal()
         dlg.Destroy()
+
+    def onVersions(self, event=None):
+        vdat = version_data(with_libraries=True)
+        out = []
+        for key, val in vdat.items():
+            out.append(f"{key:20s}:  {val}")
+        version_message =  '\n'.join(out)
+        dlg = wx.Dialog(self, wx.ID_ANY, size=(700, 400),
+                        title='Larch Versions')
+
+        font = get_font(self.fontsize)
+        dlg.SetFont(font)
+        panel = wx.Panel(dlg)
+        txt = wx.StaticText(panel, label=version_message)
+        s = wx.Sizer
+        sizer = wx.BoxSizer(wx.VERTICAL)
+        sizer.Add(txt, 1, wx.LEFT|wx.ALL, 5)
+        panel.SetSizer(sizer)
+        panel_pack(dlg, panel)
+        dlg.Show()
 
     def onShow(self, event=None):
         if event.Show:
@@ -529,7 +654,10 @@ class LarchFrame(wx.Frame):
         except:
             pass
 
-    def onExit(self, event=None, force=False):
+    def onExit(self, event=None, force=False, with_sysexit=True):
+        if not self.exit_on_close:
+            self.Hide()
+            return
         if force:
             ret = wx.ID_YES
         else:
@@ -543,24 +671,31 @@ class LarchFrame(wx.Frame):
             except:
                 pass
             try:
+                try:
+                    for a in self.GetChildren():
+                        a.Destroy()
+                except:
+                    pass
                 self.Destroy()
+
             except:
                 pass
-            sys.exit()
+            if with_sysexit:
+                sys.exit()
         else:
             try:
                 event.Veto()
             except:
                 pass
 
-
-class LarchApp(wx.App):
+class LarchApp(LarchWxApp):
     "simple app to wrap LarchFrame"
-    def __init__(self, **kws):
-        wx.App.__init__(self, **kws)
+    def __init__(self, with_inspection=False, **kws):
+        self.with_inspection = with_inspection
+        LarchWxApp.__init__(self, **kws)
 
-    def OnInit(self):
-        frame = LarchFrame(exit_on_close=True, with_inspection=False)
+    def createApp(self):
+        frame = LarchFrame(exit_on_close=True, with_inspection=self.with_inspection)
         frame.Show()
         self.SetTopWindow(frame)
         return True

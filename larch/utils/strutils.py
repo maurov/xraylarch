@@ -5,38 +5,32 @@ utilities for larch
 from __future__ import print_function
 import re
 import sys
-from base64 import b64encode, b32encode
+import os
+import uuid
 import hashlib
-import random
-from distutils.version import StrictVersion
+from base64 import b64encode, b32encode
+from random import Random
+from packaging import version as pkg_version
 
-if sys.version[0] == '3':
-    maketrans = str.maketrans
-    def bytes2str(s):
-        if isinstance(s, str):
-            return s
-        elif isinstance(s, bytes):
-            return s.decode(sys.stdout.encoding)
-        return str(s, sys.stdout.encoding)
-    def str2bytes(s):
-        'string to byte conversion'
-        if isinstance(s, bytes):
-            return s
-        return bytes(s, sys.stdout.encoding)
-
-else:
-    from string import maketrans
-    bytes2str = str2bytes = str
+from pyshortcuts import gformat, fix_filename, fix_varname, bytes2str, str2bytes
 
 
+rng = Random()
 
-RESERVED_WORDS = ('and', 'as', 'assert', 'break', 'class', 'continue',
-                  'def', 'del', 'elif', 'else', 'eval', 'except', 'exec',
-                  'execfile', 'finally', 'for', 'from', 'global', 'if',
-                  'import', 'in', 'is', 'lambda', 'not', 'or', 'pass',
-                  'print', 'raise', 'return', 'try', 'while', 'with',
-                  'group', 'end', 'endwhile', 'endif', 'endfor', 'endtry',
-                  'enddef', 'True', 'False', 'None')
+def strict_ascii(s, replacement='_'):
+    """for string to be truly ASCII with all characters below 128"""
+    t = bytes(s, 'UTF-8')
+    return ''.join([chr(a) if a < 128 else replacement for a in t])
+
+
+RESERVED_WORDS = ('False', 'None', 'True', 'and', 'as', 'assert', 'async',
+                  'await', 'break', 'class', 'continue', 'def', 'del', 'elif',
+                  'else', 'end', 'enddef', 'endfor', 'endif', 'endtry',
+                  'endwhile', 'eval', 'except', 'exec', 'execfile', 'finally',
+                  'for', 'from', 'global', 'group', 'if', 'import', 'in', 'is',
+                  'lambda', 'nonlocal', 'not', 'or', 'pass', 'print', 'raise',
+                  'return', 'try', 'while', 'with', 'yield')
+
 
 NAME_MATCH = re.compile(r"[a-zA-Z_][a-zA-Z0-9_]*(\.[a-zA-Z_][a-zA-Z0-9_]*)*$").match
 VALID_SNAME_CHARS = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_'
@@ -49,8 +43,8 @@ GOOD_FILECHARS = '_'*len(BAD_FILECHARS)
 BAD_VARSCHARS = BAD_FILECHARS + '=+-.'
 GOOD_VARSCHARS = '_'*len(BAD_VARSCHARS)
 
-TRANS_FILE = maketrans(BAD_FILECHARS, GOOD_FILECHARS)
-TRANS_VARS = maketrans(BAD_VARSCHARS, GOOD_VARSCHARS)
+TRANS_FILE = str.maketrans(BAD_FILECHARS, GOOD_FILECHARS)
+TRANS_VARS = str.maketrans(BAD_VARSCHARS, GOOD_VARSCHARS)
 
 
 def PrintExceptErr(err_str, print_trace=True):
@@ -124,30 +118,6 @@ def fixName(name, allow_dot=True):
         name = '_%s' % name
     return name
 
-
-def fix_filename(s):
-    """fix string to be a 'good' filename.
-    This may be a more restrictive than the OS, but
-    avoids nasty cases."""
-    t = str(s).translate(TRANS_FILE)
-    if t.count('.') > 1:
-        for i in range(t.count('.') - 1):
-            idot = t.find('.')
-            t = "%s_%s" % (t[:idot], t[idot+1:])
-    return t
-
-def fix_varname(s):
-    """fix string to be a 'good' variable name."""
-    t = str(s).translate(TRANS_VARS)
-
-    if len(t) < 1:
-        t = '_unlabeled_'
-    if t[0] not in VALID_CHARS1:
-        t = '_%s' % t
-    while t.endswith('_'):
-        t = t[:-1]
-    return t
-
 def common_startstring(words):
     """common starting substring for a list of words"""
     out = words[0]
@@ -184,10 +154,16 @@ def unique_name(name, nlist, max=1000):
 def isNumber(num):
     "input is a number"
     try:
-        cnum = complex(num)
+        x = float(num)
         return True
-    except ValueError:
+    except (TypeError, ValueError):
         return False
+
+def asfloat(x):
+    """try to convert value to float, or fail gracefully"""
+    return float(x) if isNumber(x) else x
+
+
 
 def isLiteralStr(inp):
     "is a literal string"
@@ -225,8 +201,7 @@ def find_delims(s, delim='"',match=None):
 
 def version_ge(v1, v2):
     "returns whether version string 1 >= version_string2"
-    return StrictVersion(bytes2str(v1)) >= StrictVersion(bytes2str(v2))
-
+    return pkg_version.parse(v1) >= pkg_version.parse(v2)
 
 def b32hash(s):
     """return a base32 hash of a string"""
@@ -240,38 +215,96 @@ def b64hash(s):
     _hash.update(str2bytes(s))
     return bytes2str(b64encode(_hash.digest()))
 
-def file2groupname(filename, slen=5, symtable=None):
+def get_sessionid():
+    """get 8 character string encoding machine name and process id"""
+    _hash = hashlib.sha256()
+    _hash.update(f"{uuid.getnode():d} {os.getpid():d}".encode('ASCII'))
+    out = b64encode(_hash.digest()).decode('ASCII')[3:11]
+    return out.replace('/', '-').replace('+', '=')
+
+
+def random_varname(n, rng_seed=None):
+    L = 'abcdefghijklmnopqrstuvwxyz0123456789'
+
+    global rng
+    if rng_seed is None:
+        rng.seed(rng_seed)
+    return rng.choice(L[:26]) + ''.join([rng.choice(L) for _ in range(n-1)])
+
+
+def file2groupname(filename, slen=9, minlen=2, symtable=None, rng_seed=None):
     """create a group name based of filename
     the group name will have a string component of
-    length slen followed by a 4 digit number
+    length slen followed by a 2 digit number
 
     Arguments
     ---------
-    filename  (str)  filename to use
-    slen      (int)  length of string portion (default 4)
+    filename  (str) filename to use
+    slen      (int) maximum length of string portion (default 9)
     symtable  (None or larch symbol table) symbol table for
               checking that the group name is unique
     """
-    def randstr(n):
-        return ''.join([chr(random.randint(97, 122)) for i in range(n)])
+    global rng
+    if rng_seed is None:
+        rng.seed(rng_seed)
 
-    gname = fix_varname(filename).lower() +  randstr(slen)
-    if '_' in gname:
-        gname = gname.replace('_', '')
-        gname = fix_varname(gname)
+    gname = fix_varname(filename).lower().replace('_', '')
 
-    fmt, count, maxcount = "%s{:04d}", 1, 999
-    fstr = fmt % (gname[:slen])
-    gname = fstr.format(count)
-    if symtable is not None:
-        scount = 0
-        while hasattr(symtable, gname):
-            count += 1
-            if count > maxcount:
-                scount += 1
-                count = 1
-                fstr = fmt % randstr(slen)
-            gname = fstr.format(count)
-            if scount > 1000:
-                raise ValueError("exhausted unique group names")
+    if gname[0] not in 'abcdefghijklmnopqrstuvwxyz':
+        gname = rng.choice(['a', 'b', 'c', 'd', 'e', 'f', 'g']) + gname
+    if len(gname) < minlen:
+        gname = gname + random_varname(minlen-len(gname))
+
+    gname = gname[:slen]
+    if symtable is None:
+        return gname
+
+    gbase = gname
+    scount, count, n = 0, 0, 2
+    while hasattr(symtable, gname):
+        count += 1
+        if count == 100:
+            count = 1
+            scount += 1
+            if scount > 200:
+                scount = 0
+                n = n + 1
+            gbase = gname + random_varname(n)
+        gname = f"{gbase}{count:02d}"
     return gname
+
+
+def break_longstring(s, maxlen=90, n1=20):
+    """breaks a long string into a list of smaller strings,
+    broken at commas, space, tab, period, or slash
+
+    returns a list of strings, even if length 1"""
+
+    minlen = maxlen-n1
+
+    if len(s) < maxlen:
+        return [s]
+    out = []
+    while len(s) > maxlen:
+        icomma = s[minlen:].find(',')
+        ispace = s[minlen:].find(' ')
+        itab   = s[minlen:].find('\t')
+        idot   = s[minlen:].find('.')
+        islash = s[minlen:].find('/')
+        ibreak =  -1
+        if icomma > 0:    ibreak = icomma
+        elif ispace > 0:  ibreak = ispace
+        elif itab > 0:    ibreak = itab
+        elif idot > 0:    ibreak = idot
+        elif islash > 0:  ibreak = islash
+        if ibreak < 0:
+            ibreak = maxlen
+        out.append(s[:ibreak+minlen+1])
+        s = s[ibreak+minlen+1:]
+    out.append(s)
+    return out
+
+
+def array_hash(arr, len=12):
+    """generate hash for an array, to tell if an array has changed"""
+    return b32hash(''.join([gformat(x, length=16) for x in arr]))[:len].lower()

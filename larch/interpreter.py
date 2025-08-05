@@ -6,23 +6,23 @@ Safe(ish) evaluator of python expressions, using ast module.
 The emphasis here is on mathematical expressions, and so
 numpy functions are imported if available and used.
 """
-from __future__ import division, print_function
 import os
 import sys
 import types
 import ast
 import math
 import numpy
-
-from . import builtins
+from pathlib import Path
+from copy import deepcopy
+from functools import partial
+from inspect import signature
 from . import site_config
+from asteval import valid_symbol_name
 from .symboltable import SymbolTable, Group, isgroup
 from .inputText import InputText, BLANK_TEXT
 from .larchlib import (LarchExceptionHolder, ReturnedNone,
-                       Procedure, StdWriter, enable_plugins)
-from .fitting  import isParameter
+                       Procedure, StdWriter)
 from .closure import Closure
-from .utils import debugtime
 
 UNSAFE_ATTRS = ('__subclasses__', '__bases__', '__globals__', '__code__',
                 '__closure__', '__func__', '__self__', '__module__',
@@ -34,19 +34,19 @@ UNSAFE_ATTRS = ('__subclasses__', '__bases__', '__globals__', '__code__',
 
 
 OPERATORS = {
-    ast.Add:    lambda a, b: b.__radd__(a) if isParameter(b) else a + b,
-    ast.Sub:    lambda a, b: b.__rsub__(a) if isParameter(b) else a - b,
-    ast.Mult:   lambda a, b: b.__rmul__(a) if isParameter(b) else a * b,
-    ast.Div:      lambda a, b: b.__rtruediv__(a) if isParameter(b) else a/b,
-    ast.FloorDiv: lambda a, b: b.__rfloordiv__(a) if isParameter(b) else a//b,
-    ast.Mod:    lambda a, b: b.__rmod__(a) if isParameter(b) else a % b,
-    ast.Pow:    lambda a, b: b.__rpow__(a) if isParameter(b) else a ** b,
-    ast.Eq:     lambda a, b: b.__eq__(a)  if isParameter(b) else a == b,
-    ast.Gt:     lambda a, b: b.__le__(a) if isParameter(b) else a > b,
-    ast.GtE:    lambda a, b: b.__lt__(a) if isParameter(b) else a >= b,
-    ast.Lt:     lambda a, b: b.__ge__(a) if isParameter(b) else a < b,
-    ast.LtE:    lambda a, b: b.__gt__(a) if isParameter(b) else a <= b,
-    ast.NotEq:  lambda a, b: b.__ne__(a) if isParameter(b) else a != b,
+    ast.Add:    lambda a, b: a + b,
+    ast.Sub:    lambda a, b: a - b,
+    ast.Mult:   lambda a, b: a * b,
+    ast.Div:      lambda a, b: a/b,
+    ast.FloorDiv: lambda a, b: a//b,
+    ast.Mod:    lambda a, b: a % b,
+    ast.Pow:    lambda a, b: a ** b,
+    ast.Eq:     lambda a, b: a == b,
+    ast.Gt:     lambda a, b: a > b,
+    ast.GtE:    lambda a, b: a >= b,
+    ast.Lt:     lambda a, b: a < b,
+    ast.LtE:    lambda a, b: a <= b,
+    ast.NotEq:  lambda a, b: a != b,
     ast.Is:     lambda a, b: a is b,
     ast.IsNot:  lambda a, b: a is not b,
     ast.In:     lambda a, b: a in b,
@@ -89,17 +89,20 @@ class Interpreter:
 
     supported_nodes = ('arg', 'assert', 'assign', 'attribute', 'augassign',
                        'binop', 'boolop', 'break', 'bytes', 'call',
-                       'compare', 'continue', 'delete', 'dict', 'ellipsis',
-                       'excepthandler', 'expr', 'expression', 'extslice',
-                       'for', 'functiondef', 'if', 'ifexp', 'import',
-                       'importfrom', 'index', 'interrupt', 'list',
-                       'listcomp', 'module', 'name', 'nameconstant', 'num',
-                       'pass', 'print', 'raise', 'repr', 'return', 'slice',
-                       'starred', 'str', 'subscript', 'try', 'tryexcept',
-                       'tryfinally', 'tuple', 'unaryop', 'while')
+                       'compare', 'constant', 'continue', 'delete', 'dict',
+                       'ellipsis', 'excepthandler', 'expr', 'expression',
+                       'extslice', 'for', 'functiondef', 'if', 'ifexp',
+                       'import', 'importfrom', 'index', 'interrupt',
+                       'list', 'listcomp', 'module', 'name',
+                       'nameconstant', 'num', 'pass', 'raise', 'repr',
+                       'return', 'slice', 'starred', 'str', 'subscript',
+                       'try', 'tryexcept', 'tryfinally', 'tuple',
+                       'unaryop', 'while',
+                       'set', 'setcomp', 'dictcomp',
+                       'with', 'formattedvalue', 'joinedstr')
 
     def __init__(self, symtable=None, input=None, writer=None,
-                 with_plugins=True, historyfile=None, maxhistory=5000):
+                 historyfile=None, maxhistory=5000):
         self.symtable   = symtable or SymbolTable(larch=self)
 
         self.input      = input or InputText(_larch=self,
@@ -110,16 +113,19 @@ class Interpreter:
         self.error      = []
         self.expr       = None
         self.retval     = None
+        self._calldepth = 0
         self.func       = None
         self.fname      = '<stdin>'
         self.lineno     = 0
         builtingroup    = self.symtable._builtin
         mathgroup       = self.symtable._math
         setattr(mathgroup, 'j', 1j)
+        setattr(mathgroup, 'np', numpy)
 
         # system-specific settings
-        enable_plugins()
         site_config.system_settings()
+        from larch import builtins
+
         for sym in builtins.from_math:
             setattr(mathgroup, sym, getattr(math, sym))
 
@@ -127,12 +133,17 @@ class Interpreter:
             setattr(builtingroup, sym, __builtins__[sym])
 
         for sym in builtins.from_numpy:
-            try:
-                setattr(mathgroup, sym, getattr(numpy, sym))
-            except AttributeError:
-                pass
-        for fname, sym in list(builtins.numpy_renames.items()):
-            setattr(mathgroup, fname, getattr(numpy, sym))
+            val = getattr(numpy, sym, None)
+            if val is not None:
+                setattr(mathgroup, sym, val)
+
+        for fname, sym in builtins.numpy_renames.items():
+            val = getattr(numpy, sym, None)
+            if val is not None:
+                setattr(mathgroup, fname, val)
+
+        for name, value in builtins.constants.items():
+            setattr(mathgroup, name, value)
 
         core_groups = ['_main', '_sys', '_builtin', '_math']
         for groupname, entries in builtins.init_builtins.items():
@@ -144,8 +155,10 @@ class Interpreter:
                 group = self.symtable.set_symbol(groupname,
                                                  value=Group(__name__=groupname))
             for fname, fcn in list(entries.items()):
-                setattr(group, fname,
-                        Closure(func=fcn, _larch=self, _name=fname))
+                if callable(fcn) and '_larch' in signature(fcn).parameters:
+                    setattr(group, fname, Closure(func=fcn, _larch=self))
+                else:
+                    setattr(group, fname, fcn)
 
         self.symtable._sys.core_groups = core_groups
         self.symtable._fix_searchGroups(force=True)
@@ -159,9 +172,6 @@ class Interpreter:
             if callable(fcn):
                 fcn(_larch=self)
 
-        for grp in builtins.init_groups:
-            self.symtable._sys.saverestore_groups.append(grp)
-
         for groupname, docstring in builtins.init_moddocs.items():
             group = self.symtable.get_group(groupname)
             group.__doc__ = docstring
@@ -171,23 +181,6 @@ class Interpreter:
         self.node_handlers = dict(((node, getattr(self, "on_%s" % node))
                                    for node in self.supported_nodes))
 
-        if with_plugins: # add all plugins in standard plugins folder
-            plugins_dir = os.path.join(site_config.usr_larchdir, 'plugins')
-            loaded_plugins = []
-            for pname in sorted(os.listdir(plugins_dir)):
-                if pname not in loaded_plugins:
-                    pdir = os.path.join(plugins_dir, pname)
-                    if os.path.isdir(pdir):
-                        builtins.add_plugin(pdir, _larch=self)
-                        loaded_plugins.append(pname)
-
-        reset_fiteval = getattr(mathgroup, 'reset_fiteval', None)
-        if callable(reset_fiteval):
-            reset_fiteval(_larch=self)
-
-    def add_plugin(self, mod, **kws):
-        """add plugin components from plugin directory"""
-        builtins.add_plugin(mod, _larch=self, **kws)
 
     def unimplemented(self, node):
         "unimplemented nodes"
@@ -213,7 +206,7 @@ class Interpreter:
             msg = '%s' % msg
         err = LarchExceptionHolder(node=node, exc=exc, msg=msg, expr=expr,
                                    fname=fname, lineno=lineno, func=func)
-        self._interrupt = ast.Break()
+        self._interrupt = ast.Raise()
         self.error.append(err)
         self.symtable._sys.last_error = err
         #raise RuntimeError
@@ -249,6 +242,13 @@ class Interpreter:
         """executes parsed Ast representation for an expression"""
         # Note: keep the 'node is None' test: internal code here may run
         #    run(None) and expect a None in return.
+        out = None
+        if len(self.error) > 0:
+            return out
+        if self.retval is not None:
+            return self.retval
+        if isinstance(self._interrupt, (ast.Break, ast.Continue)):
+            return self._interrupt
         if node is None:
             return None
         if isinstance(node, str):
@@ -275,18 +275,6 @@ class Interpreter:
             self.raise_exception(node, expr=self.expr,
                                  fname=self.fname, lineno=self.lineno)
         else:
-            # for some cases (especially when using Parameter objects),
-            # a calculation returns an otherwise numeric array, but with
-            # dtype 'object'. fix here, trying (float, complex, list).
-            if isinstance(out, numpy.ndarray):
-                if out.dtype == numpy.object:
-                    try:
-                        out = out.astype(float)
-                    except (ValueError, TypeError):
-                        try:
-                            out = out.astype(complex)
-                        except TypeError:
-                            out = list(out)
             # enumeration objects are list-ified here...
             if isinstance(out, enumerate):
                 out = list(out)
@@ -413,7 +401,7 @@ class Interpreter:
 
     def run_init_scripts(self):
         for fname in site_config.init_files:
-            if os.path.exists(fname):
+            if Path(fname).exists():
                 try:
                     self.runfile(fname)
                 except:
@@ -435,9 +423,10 @@ class Interpreter:
 
     def on_return(self, node): # ('value',)
         "return statement: look for None, return special sentinal"
+        if self._calldepth == 0:
+            raise SyntaxError('cannot return at top level')
         ret = self.run(node.value)
-        if ret is None: ret = ReturnedNone
-        self.retval = ret
+        self.retval = ret if ret is not None else ReturnedNone
         return
 
     def on_repr(self, node):
@@ -485,7 +474,8 @@ class Interpreter:
         "assert statement"
         testval = self.run(node.test)
         if not testval:
-            self.raise_exception(node, exc=AssertionError, msg=node.msg)
+            msg = node.msg.s if node.msg else ""
+            self.raise_exception(node, exc=AssertionError, msg=msg)
         return True
 
     def on_list(self, node):    # ('elt', 'ctx')
@@ -496,11 +486,19 @@ class Interpreter:
         "tuple"
         return tuple(self.on_list(node))
 
+    def on_set(self, node):    # ('elts')
+        """Set."""
+        return set([self.run(k) for k in node.elts])
+
     def on_dict(self, node):    # ('keys', 'values')
         "dictionary"
         nodevals = list(zip(node.keys, node.values))
         run = self.run
         return dict([(run(k), run(v)) for k, v in nodevals])
+
+    def on_constant(self, node):   # ('value', 'kind')
+        """Return constant value."""
+        return node.value
 
     def on_num(self, node):
         'return number'
@@ -513,6 +511,21 @@ class Interpreter:
     def on_bytes(self, node):
         'return bytes'
         return node.s  # ('s',)
+
+    def on_joinedstr(self, node):  # ('values',)
+        "join strings, used in f-strings"
+        return ''.join([self.run(k) for k in node.values])
+
+    def on_formattedvalue(self, node): # ('value', 'conversion', 'format_spec')
+        "formatting used in f-strings"
+        val = self.run(node.value)
+        fstring_converters = {115: str, 114: repr, 97: ascii}
+        if node.conversion in fstring_converters:
+            val = fstring_converters[node.conversion](val)
+        fmt = '{0}'
+        if node.format_spec is not None:
+            fmt = f'{{0:{self.run(node.format_spec)}}}'
+        return fmt.format(val)
 
     def on_nameconstant(self, node):    # ('value')
         """ Name Constant node (new in Python3.4)"""
@@ -549,6 +562,9 @@ class Interpreter:
         if len(self.error) > 0:
             return
         if node.__class__ == ast.Name:
+            if not valid_symbol_name(node.id):
+                errmsg = f"invalid symbol name (reserved word?) {node.id}"
+                self.raise_exception(node, exc=NameError, msg=errmsg)
             sym = self.symtable.set_symbol(node.id, value=val)
         elif node.__class__ == ast.Attribute:
             if node.ctx.__class__  == ast.Load:
@@ -560,13 +576,11 @@ class Interpreter:
         elif node.__class__ == ast.Subscript:
             sym    = self.run(node.value)
             xslice = self.run(node.slice)
-            if isinstance(node.slice, ast.Index):
-                sym[xslice] = val
-            elif isinstance(node.slice, ast.Slice):
+            if isinstance(node.slice, ast.Slice):
                 i = xslice.start
                 sym[slice(xslice.start, xslice.stop)] = val
-            elif isinstance(node.slice, ast.ExtSlice):
-                sym[(xslice)] = val
+            else:
+                sym[xslice] = val
         elif node.__class__ in (ast.Tuple, ast.List):
             if len(val) == len(node.elts):
                 for telem, tval in zip(node.elts, val):
@@ -623,11 +637,8 @@ class Interpreter:
         val    = self.run(node.value)
         nslice = self.run(node.slice)
         ctx = node.ctx.__class__
-        if ctx in ( ast.Load, ast.Store):
-            if isinstance(node.slice, (ast.Index, ast.Slice, ast.Ellipsis)):
-                return val.__getitem__(nslice)
-            elif isinstance(node.slice, ast.ExtSlice):
-                return val[(nslice)]
+        if ctx in (ast.Load, ast.Store):
+            return val[nslice]
         else:
             msg = "subscript with unknown context"
             self.raise_exception(node, msg=msg)
@@ -637,18 +648,27 @@ class Interpreter:
         for tnode in node.targets:
             if tnode.ctx.__class__ != ast.Del:
                 break
-            children = []
-            while tnode.__class__ == ast.Attribute:
-                children.append(tnode.attr)
-                tnode = tnode.value
-
-            if tnode.__class__ == ast.Name:
-                children.append(tnode.id)
-                children.reverse()
-                self.symtable.del_symbol('.'.join(children))
+            if tnode.__class__ == ast.Subscript:
+                try:
+                    parent = self.run(tnode.value)
+                    if hasattr(parent, '__delitem__') and tnode.slice.__class__ == ast.Constant:
+                        child = tnode.slice.value
+                        parent.__delitem__(child)
+                except:
+                    msg = "could not delete symbol"
+                    self.raise_exception(node, msg=msg)
             else:
-                msg = "could not delete symbol"
-                self.raise_exception(node, msg=msg)
+                children = []
+                while tnode.__class__ == ast.Attribute:
+                    children.append(tnode.attr)
+                    tnode = tnode.value
+                if tnode.__class__ == ast.Name:
+                    children.append(tnode.id)
+                    children.reverse()
+                    self.symtable.del_symbol('.'.join(children))
+                else:
+                    msg = "could not delete symbol"
+                    self.raise_exception(node, msg=msg)
 
     def on_unaryop(self, node):    # ('op', 'operand')
         "unary operator"
@@ -683,7 +703,7 @@ class Interpreter:
                 break
         return out
 
-    def on_print(self, node):    # ('dest', 'values', 'nl')
+    def on_printOLD(self, node):    # ('dest', 'values', 'nl')
         """ note: implements Python2 style print statement, not
         print() function.  Probably, the 'larch2py' translation
         should look for and translate print -> print_() to become
@@ -711,6 +731,29 @@ class Interpreter:
         if self.run(node.test):
             expr = node.body
         return self.run(expr)
+
+    def on_with(self, node):    # ('items', 'body', 'type_comment')
+        """with blocks."""
+        contexts = []
+        for item in node.items:
+            ctx = self.run(item.context_expr)
+            contexts.append(ctx)
+            if hasattr(ctx, '__enter__'):
+                result = ctx.__enter__()
+                if item.optional_vars is not None:
+                    self.node_assign(item.optional_vars, result)
+            else:
+                msg = "object does not support the context manager protocol"
+                raise TypeError(f"'{type(ctx)}' {msg}")
+        for bnode in node.body:
+            self.run(bnode)
+            if self._interrupt is not None:
+                break
+
+        for ctx in contexts:
+            if hasattr(ctx, '__exit__'):
+                ctx.__exit__()
+
 
     def on_while(self, node):    # ('test', 'body', 'orelse')
         "while blocks"
@@ -747,20 +790,104 @@ class Interpreter:
                 self.run(tnode)
         self._interrupt = None
 
-    def on_listcomp(self, node):    # ('elt', 'generators')
-        "list comprehension"
-        out = []
+
+    def comprehension_data(self, node):      # ('elt', 'generators')
+        "data for comprehensions"
+        mylocals = {}
+        saved_syms = {}
+
         for tnode in node.generators:
             if tnode.__class__ == ast.comprehension:
+                if tnode.target.__class__ == ast.Name:
+                    if not valid_symbol_name(tnode.target.id):
+                        errmsg = f"invalid symbol name (reserved word?) {tnode.target.id}"
+                        self.raise_exception(tnode.target, exc=NameError, msg=errmsg)
+                    mylocals[tnode.target.id] = []
+                    if self.symtable.has_symbol(tnode.target.id):
+                        saved_syms[tnode.target.id] = deepcopy(self.symtable.get_symbol(tnode.target.id))
+
+                elif tnode.target.__class__ == ast.Tuple:
+                    target = []
+                    for tval in tnode.target.elts:
+                        mylocals[tval.id] = []
+                        if self.symtable.has_symbol(tval.id):
+                            saved_syms[tval.id] = deepcopy(self.symtable.get_symbol(tval.id))
+
+        for tnode in node.generators:
+            if tnode.__class__ == ast.comprehension:
+                ttype = 'name'
+                if tnode.target.__class__ == ast.Name:
+                    if not valid_symbol_name(tnode.target.id):
+                        errmsg = f"invalid symbol name (reserved word?) {tnode.target.id}"
+                        self.raise_exception(tnode.target, exc=NameError, msg=errmsg)
+                    ttype, target = 'name', tnode.target.id
+                elif tnode.target.__class__ == ast.Tuple:
+                    ttype = 'tuple'
+                    target =tuple([tval.id for tval in tnode.target.elts])
+
                 for val in self.run(tnode.iter):
-                    self.node_assign(tnode.target, val)
-                    if len(self.error) > 0:
-                        return
+                    if ttype == 'name':
+                        self.symtable.set_symbol(target, val)
+                    else:
+                        for telem, tval in zip(target, val):
+                            self.symtable.set_symbol(target, val)
+
                     add = True
                     for cond in tnode.ifs:
                         add = add and self.run(cond)
                     if add:
-                        out.append(self.run(node.elt))
+                        if ttype == 'name':
+                            mylocals[target].append(val)
+                        else:
+                            for telem, tval in zip(target, val):
+                                mylocals[telem].append(tval)
+        return mylocals, saved_syms
+
+    def on_listcomp(self, node):
+        """List comprehension"""
+        mylocals, saved_syms = self.comprehension_data(node)
+
+        names = list(mylocals.keys())
+        data = list(mylocals.values())
+        def listcomp_recurse(out, i, names, data):
+            if i == len(names):
+                out.append(self.run(node.elt))
+                return
+
+            for val in data[i]:
+                self.symtable.set_symbol(names[i], val)
+                listcomp_recurse(out, i+1, names, data)
+
+        out = []
+        listcomp_recurse(out, 0, names, data)
+        for name, val in saved_syms.items():
+            self.symtable.set_symbol(name, val)
+        return out
+
+    def on_setcomp(self, node):
+        """Set comprehension"""
+        return set(self.on_listcomp(node))
+
+    def on_dictcomp(self, node):
+        """Dictionary comprehension"""
+        mylocals, saved_syms = self.comprehension_data(node)
+
+        names = list(mylocals.keys())
+        data = list(mylocals.values())
+
+        def dictcomp_recurse(out, i, names, data):
+            if i == len(names):
+                out[self.run(node.key)] = self.run(node.value)
+                return
+
+            for val in data[i]:
+                self.symtable.set_symbol(names[i], val)
+                dictcomp_recurse(out, i+1, names, data)
+
+        out = {}
+        dictcomp_recurse(out, 0, names, data)
+        for name, val in saved_syms.items():
+            self.symtable.set_symbol(name, val)
         return out
 
     def on_excepthandler(self, node): # ('type', 'name', 'body')
@@ -815,13 +942,7 @@ class Interpreter:
             msg = "'%s' is not callable!!" % (func)
             self.raise_exception(node, exc=TypeError, msg=msg)
 
-        args = []
-        for narg in node.args:
-            aadd = args.append
-            if isinstance(narg, ast.Starred):
-                aadd = args.extend
-            aadd(self.run(narg))
-
+        args = [self.run(targ) for targ in node.args]
         starargs = getattr(node, 'starargs', None)
         if starargs is not None:
             args = args + self.run(starargs)
@@ -829,13 +950,16 @@ class Interpreter:
         keywords = {}
         if func == print:
             keywords['file'] = self.writer
-
         for key in node.keywords:
             if not isinstance(key, ast.keyword):
                 msg = "keyword error in function call '%s'" % (func)
                 self.raise_exception(node, msg=msg)
-            if key.arg is None:   # Py3 **kwargs !
+            if key.arg is None:
                 keywords.update(self.run(key.value))
+            elif key.arg in keywords:
+                self.raise_exception(node,
+                                     msg="keyword argument repeated: %s" % key.arg,
+                                     exc=SyntaxError)
             else:
                 keywords[key.arg] = self.run(key.value)
 
@@ -843,10 +967,20 @@ class Interpreter:
         if kwargs is not None:
             keywords.update(self.run(kwargs))
 
+        if isinstance(func, Procedure):
+            self._calldepth += 1
         try:
-            return func(*args, **keywords)
-        except:
-            self.raise_exception(node, msg="Error running %s" % (func))
+            out = func(*args, **keywords)
+        except Exception as ex:
+            out = None
+            func_name = getattr(func, '__name__', str(func))
+            self.raise_exception(
+                node, msg="Error running function call '%s' with args %s and "
+                "kwargs %s: %s" % (func_name, args, keywords, ex))
+        finally:
+            if isinstance(func, Procedure):
+                self._calldepth -= 1
+        return out
 
     def on_functiondef(self, node):
         "define procedures"
@@ -863,9 +997,9 @@ class Interpreter:
         args = [tnode.arg for tnode in node.args.args[:offset]]
         doc = None
         if (isinstance(node.body[0], ast.Expr) and
-            isinstance(node.body[0].value, ast.Str)):
+            isinstance(node.body[0].value, ast.Constant)):
             docnode = node.body[0]
-            doc = docnode.value.s
+            doc = docnode.value.value
 
         vararg = self.run(node.args.vararg)
         varkws = self.run(node.args.kwarg)
@@ -915,7 +1049,7 @@ class Interpreter:
         """
         st_sys = self.symtable._sys
         for idir in st_sys.path:
-            if idir not in sys.path and os.path.exists(idir):
+            if idir not in sys.path and Path(idir).exists():
                 sys.path.append(idir)
 
         # step 1  import the module to a global location
@@ -928,17 +1062,16 @@ class Interpreter:
             thismod = st_sys.modules[name]
         elif name in sys.modules:
             thismod = sys.modules[name]
-
         if thismod is None or do_reload:
             # first look for "name.lar"
             islarch = False
             larchname = "%s.lar" % name
             for dirname in st_sys.path:
-                if not os.path.exists(dirname):
+                if not Path(dirname).exists():
                     continue
                 if larchname in sorted(os.listdir(dirname)):
                     islarch = True
-                    modname = os.path.abspath(os.path.join(dirname, larchname))
+                    modname = Path(dirname, larchname).absolute().as_posix()
                     try:
                         thismod = self.runfile(modname, new_module=name)
                     except:

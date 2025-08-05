@@ -23,7 +23,7 @@
 # 2014-Apr M Newville : translated to Python for Larch
 
 import numpy as np
-from larch import Make_CallArgs, parse_group_args
+from larch.larchlib import Make_CallArgs, parse_group_args
 from larch.math import complex_phase
 from .xafsutils import set_xafsGroup
 
@@ -49,8 +49,8 @@ def cauchy_wavelet(k, chi=None, group=None, kweight=0, rmax_out=10,
     Notes:
     -------
     Arrays written to output group:
-    r                  uniform array of R, out to rmax_out.
     wcauchy            complex cauchy wavelet(k, R)
+    wcauchy_r          uniform array of R, out to rmax_out.
     wcauchy_mag        magnitude of wavelet(k, R)
     wcauchy_re         real part of wavelet(k, R)
     wcauchy_im         imaginary part of wavelet(k, R)
@@ -108,8 +108,8 @@ def cauchy_wavelet(k, chi=None, group=None, kweight=0, rmax_out=10,
         out[i, :] = np.fft.ifft(tmp, 2*nfft)[:nkout]
 
     group = set_xafsGroup(group, _larch=_larch)
-    group.r  =  r
-    group.wcauchy =  out
+    group.wcauchy_r  =  r
+    group.wcauchy    =  out
     group.wcauchy_mag =  np.sqrt(out.real**2 + out.imag**2)
     group.wcauchy_re =  out.real
     group.wcauchy_im =  out.imag

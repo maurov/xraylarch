@@ -2,14 +2,15 @@
 #
 # InputText for  Larch
 
-from __future__ import print_function
 import os
 import sys
+import io
 import time
+from pathlib import Path
 from collections import deque
 from copy import copy
-import io
-FILETYPE = io.IOBase
+
+from .utils import read_textfile
 
 OPENS  = '{(['
 CLOSES = '})]'
@@ -94,7 +95,9 @@ def get_key(text):
     """return keyword: first word of text,
     isolating keywords followed by '(' and ':' """
     t =  text.replace('(', ' (').replace(':', ' :').strip()
-    return t.split(' ', 1)[0].strip()
+    if len(t) == 0:
+        return ''
+    return t.split(None, 1)[0].strip()
 
 def block_start(text):
     """return whether a complete-extended-line of text
@@ -117,7 +120,7 @@ def block_end(text):
         n = 3
         if txt.startswith('#end'):
             n = 4
-        key = txt[n:].split(' ', 1)[0].strip()
+        key = txt[n:].split(None, 1)[0].strip()
         if key in STARTKEYS:
             return key
     return False
@@ -149,18 +152,15 @@ class HistoryBuffer(object):
     def load(self, filename=None):
         if filename is not None:
             self.filename = filename
-        if os.path.exists(self.filename):
+        if Path(filename).exists():
             self.clear()
-            with open(self.filename, 'r') as fh:
-                lines = fh.readlines()
-                for hline in lines:
-                    self.add(text=hline[:-1])
+            text = read_textfile(filename).split('\n')
+            for hline in text:
+                if not hline.startswith("# larch history"):
+                    self.add(text=hline)
             self.session_start = len(self.buffer)
 
-    def save(self, filename=None, session_only=False,
-             trim_last=False, maxlines=None):
-        if filename is None:
-            filename = self.filename
+    def get(self, session_only=False, trim_last=False, maxlines=None):
         if maxlines is None:
             maxlines = self.maxlines
         start_ = -maxlines
@@ -176,7 +176,18 @@ class HistoryBuffer(object):
             if not (bline.startswith(comment) or len(bline) < 0):
                 out.append(str(bline))
         out.append('')
-        with open(filename, 'w') as fh:
+        return out
+
+    def save(self, filename=None, session_only=False,
+             trim_last=False, maxlines=None):
+        if filename is None:
+            filename = self.filename
+        out = self.get(session_only=session_only,
+                       trim_last=trim_last,
+                       maxlines=maxlines)
+        out.append('')
+
+        with open(filename, 'w', encoding=sys.getdefaultencoding()) as fh:
             fh.write('\n'.join(out))
 
 class InputText:
@@ -193,6 +204,7 @@ class InputText:
         self.larch = _larch
         self.prompt = prompt
         self.prompt2 = prompt2
+        self.valid_commands = None
         self.saved_text = BLANK_TEXT
         self.history = HistoryBuffer(filename=historyfile,
                                      maxlines=maxhistory)
@@ -245,15 +257,13 @@ class InputText:
 
         text = None
         try:
-            if isinstance(filename, FILETYPE):
-                text = filename.read()
-                filename = filename.name
-            else:
-                text = open(filename).read()
+            text = read_textfile(filename)
         except:
             errtype, errmsg, errtb = sys.exc_info()
             return (errtype, errmsg)
 
+        if isinstance(filename, io.IOBase):
+            filename = filename.name
 
         if text is None:
             return (IOError, 'cannot read %s' % filename)
@@ -276,6 +286,8 @@ class InputText:
 
         if self.larch is not None:
             getsym = self.larch.symtable.get_symbol
+
+        if self.valid_commands is None:
             self.valid_commands = getsym('_sys.valid_commands', create=True)
 
         if self.history is not None and add_history:

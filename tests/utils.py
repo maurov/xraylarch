@@ -10,9 +10,10 @@ import os
 import sys
 import numpy as np
 from tempfile import NamedTemporaryFile
-from larch import Interpreter, InputText
+from larch.interpreter import Interpreter
+from larch.inputText import InputText
 
-from six.moves import StringIO
+from io import StringIO
 
 def nullfunction(*args, **kwargs):
     pass

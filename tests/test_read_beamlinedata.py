@@ -1,14 +1,19 @@
-import os
-from larch.io import read_ascii, guess_beamline
+from pathlib import Path
+from larch.io import read_ascii, guess_beamline, guess_filereader, read_fdmnes
 
-def _tester(fname):
-    fname = os.path.join('..', 'examples', 'xafsdata', 'beamlines', fname)
+base_dir = Path(__file__).parent.parent.resolve()
+
+def _tester(fname, return_group=False):
+    fname =  base_dir / 'examples' / 'xafsdata' / 'beamlines' / fname
     group = read_ascii(fname)
     cls = guess_beamline(group.header)
     bldat = cls(group.header)
     labels = bldat.get_array_labels()
     print(fname, cls.__name__, len(labels), group.data.shape, labels)
-    return bldat, labels
+    if return_group:
+        return bldat, labels, group
+    else:
+        return bldat, labels
 
 def test_apsxsd_new(fname='APS9BM_2019.dat'):
     bldat, labels = _tester(fname)
@@ -18,6 +23,17 @@ def test_apsxsd_new(fname='APS9BM_2019.dat'):
     assert(labels[0]  == 'mono_energy')
     assert(labels[1].startswith('scaler_pre'))
     assert(labels[4].startswith('i0'))
+
+
+def test_apsxsd20id_newer(fname='APS20ID_2022.dat'):
+    bldat, labels = _tester(fname)
+    assert('aps xsd' in bldat.name.lower())
+    assert(1 == bldat.energy_column)
+    assert('eV' == bldat.energy_units)
+    assert(labels[0].startswith('mono_energy'))
+    assert(labels[1].startswith('scaler_pre'))
+    assert(labels[-1] == "xsp3_4_total")
+    assert('it' in labels)
 
 
 def test_apsxsd20id_new(fname='APS20ID_2018.dat'):
@@ -180,6 +196,22 @@ def test_kekpf12c(fname='PFBL12C_2005.dat'):
     assert(bldat.mono_dspace > 3)
     assert(len(labels) == 5)
 
+def test_one_line_header(fname='ESRF_BM08_LISA_2021.dat'):
+    bldat, labels = _tester(fname)
+    assert(labels == ['ebraggenergy', 'i0_eh1', 'i1_eh1', 'mu', 'i1_eh2', 'ir_eh2', 'mu_ref'])
+
+def test_zero_line_header(fname='generic_columns_no_header.dat'):
+    bldat, labels, group = _tester(fname, return_group=True)
+    assert(group.array_labels == ['col1', 'col2', 'col3', 'col4', 'col5', 'col6', 'col7'])
+
+def test_fdmnes(fnames=['FDMNES_2022_Mo2C_out.dat', 'FDMNES_2022_Mo2C_out_conv.dat']):
+    for fname in fnames:
+        fname =  base_dir / 'examples' / 'xafsdata' / 'beamlines' / fname
+        assert(guess_filereader(fname) == 'read_fdmnes')
+        group = read_fdmnes(fname)
+        assert(group.array_labels == ['energy', 'xanes'])
+        assert(group.header_dict['E_edge'] == 20000.0)
+
 if __name__ == '__main__':
     test_apsxsd_new()
     test_apsxsd_old()
@@ -196,3 +228,6 @@ if __name__ == '__main__':
     test_nslsxdac()
     test_clshxma()
     test_kekpf12c()
+    test_one_line_header()
+    test_zero_line_header()
+    test_fdmnes()

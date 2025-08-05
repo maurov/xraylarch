@@ -13,12 +13,13 @@ materials       dictionary of composition of common materials
 chemparse       parse a Chemical formula to compositiondictionary.
 atomic_mass     return atomic mass for an element
 f0              Thomson X-ray scattering factor
-f1f2_cl         Anomalous scattering factors from Cromer-Libermann
 mu_elam         X-ray attenuation coefficients from Elam etal
 mu_chantler     X-ray attenuation coefficients from Chantler
 xray_edges      X-ray absorption edges for an element
 xray_lines      X-ray emission lines for an element
 """
+
+from larch.utils.physical_constants import ATOM_SYMS
 
 from xraydb import (XrayDB, atomic_mass, atomic_number, atomic_symbol,
                     atomic_density, xray_line, xray_lines, xray_edge,
@@ -34,7 +35,7 @@ from xraydb.materials import (get_material, add_material, material_mu,
 material_add = add_material
 material_get = get_material
 
-from .cromer_liberman import f1f2 as f1f2_cl
+# from .cromer_liberman import f1f2 as f1f2_cl
 from .background import XrayBackground
 
 _larch_builtins = {'_xray': dict(chemparse=chemparse,
@@ -44,7 +45,7 @@ _larch_builtins = {'_xray': dict(chemparse=chemparse,
                                  add_material=material_add,
                                  material_mu=material_mu,
                                  material_mu_components=material_mu_components,
-                                 f1f2_cl=f1f2_cl,
+                                 # f1f2_cl=f1f2_cl,
                                  f0=f0,
                                  f0_ions=f0_ions,
                                  chantler_energies=chantler_energies,
@@ -75,3 +76,4 @@ def _larch_init(_larch):
     setsym = _larch.symtable.set_symbol
     setsym('_xray._xraydb', XrayDB())
     setsym('_xray._materials', _read_materials_db())
+    setsym('_xray._atomic_symbols', ATOM_SYMS)

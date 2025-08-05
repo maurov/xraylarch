@@ -13,40 +13,24 @@ from functools import partial
 import wx
 import wx.lib.mixins.inspection
 import wx.lib.scrolledpanel as scrolled
-try:
-    from wx._core import PyDeadObjectError
-except:
-    PyDeadObjectError = Exception
+import wx.dataview as dv
 
-import wx.lib.colourselect  as csel
 import numpy as np
 import matplotlib
 
-HAS_PLOT = False
-try:
-    from wxmplot import PlotPanel
-    HAS_PLOT = True
-except ImportError:
-    HAS_PLOT = False
-
-HAS_DV = False
-try:
-    import wx.dataview as dv
-    HAS_DV = True
-except:
-    pass
-
+from pyshortcuts import fix_filename
+from wxmplot import PlotPanel
 from wxutils import (SimpleText, EditableListBox, Font, FloatCtrl,
                      pack, Popup, Button, get_icon, Check, MenuItem,
-                     Choice, FileOpen, FileSave, fix_filename, HLine,
+                     Choice, FileOpen, FileSave, HLine,
                      GridPanel, CEN, LEFT, RIGHT)
-
 
 import larch
 from larch.site_config import icondir
-from larch.wxlib import PeriodicTablePanel
+from larch.wxlib import PeriodicTablePanel, LarchWxApp, GUI_COLORS
 from larch.wxlib.xrfdisplay import (XRFDisplayFrame, XRFCalibrationFrame,
                                     FILE_WILDCARDS)
+from larch.utils import get_cwd
 
 ROI_WILDCARD = 'Data files (*.dat)|*.dat|ROI files (*.roi)|*.roi|All files (*.*)|*.*'
 try:
@@ -55,12 +39,13 @@ try:
 except:
     pass
 
-HAS_SCANDB = False
-try:
-    from epicsscan import ScanDB
-    HAS_SCANDB = True
-except:
-    pass
+def warning_color(val, warn, error):
+    tcolor = GUI_COLORS.text
+    if val > warn:
+        tcolor = GUI_COLORS.orangered4
+    if val > error:
+        tcolor = GUI_COLORS.text_invalid
+    return tcolor
 
 class DetectorSelectDialog(wx.Dialog):
     """Connect to an Epics MCA detector
@@ -142,7 +127,7 @@ class EpicsXRFDisplayFrame(XRFDisplayFrame):
 
     def __init__(self, parent=None, _larch=None, prefix=None,
                  det_type='ME-4', ioc_type='Xspress3', nmca=4,
-                 size=(725, 580), environ_file=None, scandb_conn=None,
+                 size=(725, 580), environ_file=None,
                  title='Epics XRF Display', output_title='XRF', **kws):
 
         self.det_type = det_type
@@ -150,12 +135,9 @@ class EpicsXRFDisplayFrame(XRFDisplayFrame):
         self.nmca = nmca
         self.det_fore = 1
         self.det_back = 0
-        self.scandb = None
         self.environ = []
         if environ_file is not None:
             self.read_environfile(environ_file)
-        if HAS_SCANDB and scandb_conn is not None:
-            self.ConnectScanDB(**scandb_conn)
 
         self.onConnectEpics(event=None, prefix=prefix)
 
@@ -176,7 +158,7 @@ class EpicsXRFDisplayFrame(XRFDisplayFrame):
             self.environ = []
             for line in textlines:
                 line = line[:-1].replace('\t', ' ')
-                pvname, desc = line.split(' ', 1)
+                pvname, desc = line.split(None, 1)
                 desc = desc.strip()
                 self.environ.append((pvname, desc))
 
@@ -193,26 +175,6 @@ class EpicsXRFDisplayFrame(XRFDisplayFrame):
         self.clear_mcas()
         self.connect_to_detector(prefix=self.prefix, ioc_type=self.ioc_type,
                                  det_type=self.det_type, nmca=self.nmca)
-
-    def ConnectScanDB(self, **kws):
-        if not HAS_SCANDB:
-            return
-        self.scandb = ScanDB(**kws)
-        if self.scandb is not None:
-            basedir = self.scandb.get_info('user_folder')
-            fileroot = self.scandb.get_info('server_fileroot')
-        basedir = str(basedir)
-        fileroot = str(fileroot)
-        if basedir.startswith(fileroot):
-            basedir = basedir[len(fileroot):]
-        fullpath = os.path.join(fileroot, basedir)
-        fullpath = fullpath.replace('\\', '/').replace('//', '/')
-        curdir = os.getcwd()
-        try:
-            os.chdir(fullpath)
-        except:
-            os.chdir(curdir)
-        self.scandb.connect_pvs()
 
     def onSaveMCAFile(self, event=None, **kws):
         tmp = '''
@@ -233,23 +195,14 @@ class EpicsXRFDisplayFrame(XRFDisplayFrame):
                            default_file=deffile,
                            wildcard=FILE_WILDCARDS)
 
-        environ = []
-        if HAS_SCANDB and self.scandb is not None:
-            c, table = self.scandb.get_table('pvs')
-            pvrows = self.scandb.query(table).all()
-            for row in pvrows:
-                addr = str(row.name)
-                desc = str(row.notes)
-                val  = self.scandb.pvs[addr].get(as_string=True)
-                environ.append((addr, val, desc))
-
-        elif len(self.environ) > 0:
+        env = []
+        if len(self.environ) > 0:
             for pvname, desc in self.environ:
                 val  = caget(pvname, as_string=True)
-                environ.append((pvname, val, desc))
+                env.append((pvname, val, desc))
 
         if outfile is not None:
-            self.det.save_mcafile(outfile, environ=environ)
+            self.det.save_mcafile(outfile, environ=env)
 
     def onSaveColumnFile(self, event=None, **kws):
         print( '  EPICS-XRFDisplay onSaveColumnFile not yet implemented  ')
@@ -281,6 +234,7 @@ class EpicsXRFDisplayFrame(XRFDisplayFrame):
             self.needs_newplot=True
         else:
             self.det = Epics_MultiXMAP(prefix=prefix, nmca=nmca)
+        time.sleep(0.05)
 
     def show_mca(self, init=False):
         self.needs_newplot = False
@@ -309,13 +263,14 @@ class EpicsXRFDisplayFrame(XRFDisplayFrame):
             self.onROI(label=roiname)
         dtime = self.det.get_deadtime(mca=self.det_fore)
         if dtime is not None:
-            self.wids['deadtime'].SetLabel("%.1f" % dtime)
-        self.SetTitle("%s: %s" % (self.main_title, title))
+            self.wids['deadtime'].SetLabel(f"{dtime:.1f}")
+        self.wids['deadtime'].SetForegroundColour(warning_color(dtime, 25, 50))
+        self.SetTitle(f"{self.main_title}: {title}")
         self.needs_newplot = False
 
     def onSaveROIs(self, event=None, **kws):
         dlg = wx.FileDialog(self, message="Save ROI File",
-                            defaultDir=os.getcwd(),
+                            defaultDir=get_cwd(),
                             wildcard=ROI_WILDCARD,
                             style = wx.FD_SAVE|wx.FD_CHANGE_DIR)
 
@@ -326,7 +281,7 @@ class EpicsXRFDisplayFrame(XRFDisplayFrame):
 
     def onRestoreROIs(self, event=None, **kws):
         dlg = wx.FileDialog(self, message="Read ROI File",
-                            defaultDir=os.getcwd(),
+                            defaultDir=get_cwd(),
                             wildcard=ROI_WILDCARD,
                             style = wx.FD_OPEN|wx.FD_CHANGE_DIR)
 
@@ -378,52 +333,51 @@ class EpicsXRFDisplayFrame(XRFDisplayFrame):
 
     def create_detbuttons(self, pane):
         btnpanel = wx.Panel(pane, name='buttons')
-        btnsizer = wx.GridBagSizer(1, 1)        
+        btnsizer = wx.GridBagSizer(1, 1)
         btns = {}
-        sx = 30
+        sx = 36
         sy = int(sx/2)
         for i in range(1, self.nmca+1):
-            b = Button(btnpanel, '%d' % i, size=(sx, sx),
+            b = Button(btnpanel, f'{i}', size=(sx, sx),
                        action=partial(self.onSelectDet, index=i))
-            b.SetFont(Font(10))
+            b.SetFont(Font(9))
             self.wids['det%i' % i] = b
             btns[i] = b
         dtype = self.det_type.lower().replace('-', '').replace(' ', '').replace('_', '')
-           
         if dtype.startswith('sxd7') and self.nmca == 7:
             btnsizer.Add((sx, sy), (0, 0), (1, 2), wx.ALIGN_LEFT, 1)
-            btnsizer.Add(btns[4],  (1, 0), (2, 2), wx.ALIGN_LEFT, 1)            
-            btnsizer.Add(btns[5],  (3, 0), (2, 2), wx.ALIGN_LEFT, 1)
-            btnsizer.Add((sx, sy), (5, 0), (1, 2), wx.ALIGN_LEFT, 1)            
-            btnsizer.Add(btns[3],  (0, 2), (2, 2), wx.ALIGN_LEFT, 1)            
-            btnsizer.Add(btns[7],  (2, 2), (2, 2), wx.ALIGN_LEFT, 1)
-            btnsizer.Add(btns[6],  (4, 2), (2, 2), wx.ALIGN_LEFT, 1)
+            btnsizer.Add(btns[6],  (1, 0), (2, 2), wx.ALIGN_LEFT, 1)
+            btnsizer.Add(btns[7],  (3, 0), (2, 2), wx.ALIGN_LEFT, 1)
+            btnsizer.Add((sx, sy), (5, 0), (1, 2), wx.ALIGN_LEFT, 1)
+            btnsizer.Add(btns[5],  (0, 2), (2, 2), wx.ALIGN_LEFT, 1)
+            btnsizer.Add(btns[4],  (2, 2), (2, 2), wx.ALIGN_LEFT, 1)
+            btnsizer.Add(btns[1],  (4, 2), (2, 2), wx.ALIGN_LEFT, 1)
             btnsizer.Add((sx, sy), (0, 4), (1, 2), wx.ALIGN_LEFT, 1)
-            btnsizer.Add(btns[2],  (1, 4), (2, 2), wx.ALIGN_LEFT, 1)            
-            btnsizer.Add(btns[1],  (3, 4), (2, 2), wx.ALIGN_LEFT, 1)
+            btnsizer.Add(btns[3],  (1, 4), (2, 2), wx.ALIGN_LEFT, 1)
+            btnsizer.Add(btns[2],  (3, 4), (2, 2), wx.ALIGN_LEFT, 1)
             btnsizer.Add((sx, sy), (5, 4), (1, 2), wx.ALIGN_LEFT, 1)
         elif dtype.startswith('me7') and self.nmca == 7:
-            btnsizer.Add((sx, sy), (0, 0), (1, 2), wx.ALIGN_LEFT, 1)            
-            btnsizer.Add(btns[7],  (1, 0), (2, 2), wx.ALIGN_LEFT, 1)            
+            btnsizer.Add((sx, sy), (0, 0), (1, 2), wx.ALIGN_LEFT, 1)
+            btnsizer.Add(btns[7],  (1, 0), (2, 2), wx.ALIGN_LEFT, 1)
             btnsizer.Add(btns[6],  (3, 0), (2, 2), wx.ALIGN_LEFT, 1)
-            btnsizer.Add((sx, sy), (5, 0), (1, 2), wx.ALIGN_LEFT, 1)                        
-            btnsizer.Add(btns[2],  (0, 2), (2, 2), wx.ALIGN_LEFT, 1)            
+            btnsizer.Add((sx, sy), (5, 0), (1, 2), wx.ALIGN_LEFT, 1)
+            btnsizer.Add(btns[2],  (0, 2), (2, 2), wx.ALIGN_LEFT, 1)
             btnsizer.Add(btns[1],  (2, 2), (2, 2), wx.ALIGN_LEFT, 1)
             btnsizer.Add(btns[5],  (4, 2), (2, 2), wx.ALIGN_LEFT, 1)
             btnsizer.Add((sx, sy), (0, 4), (1, 2), wx.ALIGN_LEFT, 1)
-            btnsizer.Add(btns[3],  (1, 4), (2, 2), wx.ALIGN_LEFT, 1)            
+            btnsizer.Add(btns[3],  (1, 4), (2, 2), wx.ALIGN_LEFT, 1)
             btnsizer.Add(btns[4],  (3, 4), (2, 2), wx.ALIGN_LEFT, 1)
             btnsizer.Add((sx, sy), (5, 4), (1, 2), wx.ALIGN_LEFT, 1)
         elif dtype.startswith('me4') and self.nmca == 4:
-            btnsizer.Add(btns[1],  (0, 0), (1, 1), wx.ALIGN_LEFT, 1)            
-            btnsizer.Add(btns[2],  (1, 0), (1, 1), wx.ALIGN_LEFT, 1)            
-            btnsizer.Add(btns[3],  (1, 1), (1, 1), wx.ALIGN_LEFT, 1)            
+            btnsizer.Add(btns[1],  (0, 0), (1, 1), wx.ALIGN_LEFT, 1)
+            btnsizer.Add(btns[2],  (1, 0), (1, 1), wx.ALIGN_LEFT, 1)
+            btnsizer.Add(btns[3],  (1, 1), (1, 1), wx.ALIGN_LEFT, 1)
             btnsizer.Add(btns[4],  (0, 1), (1, 1), wx.ALIGN_LEFT, 1)
         else:
             NPERROW = 4
             icol, irow = 0, 0
             for nmca  in range(1, self.nmca+1):
-                btnsizer.Add(btns[nmca],  (irow, icol), (1, 1), wx.ALIGN_LEFT, 1)            
+                btnsizer.Add(btns[nmca],  (irow, icol), (1, 1), wx.ALIGN_LEFT, 1)
                 icol += 1
                 if icol > NPERROW-1:
                     icol = 0
@@ -431,12 +385,12 @@ class EpicsXRFDisplayFrame(XRFDisplayFrame):
 
         pack(btnpanel, btnsizer)
         return btnpanel
-        
+
     def createEpicsPanel(self):
         pane = wx.Panel(self, name='epics panel')
         style  = wx.ALIGN_LEFT
         rstyle = wx.ALIGN_RIGHT
-       
+
         det_btnpanel = self.create_detbuttons(pane)
 
         bkg_choices = ['None'] + ["%d" % (i+1) for i in range(self.nmca)]
@@ -457,6 +411,29 @@ class EpicsXRFDisplayFrame(XRFDisplayFrame):
                                       action=self.onMcaSumChoice,
                                       default=1 )
 
+        roipanel = wx.Panel(pane)
+        roisizer = wx.GridBagSizer(3, 3)
+        rlabel = SimpleText(roipanel, 'Count Rates (Hz)',  style=LEFT, size=(150, -1))
+        tlabel = SimpleText(roipanel, 'Output Count Rate',  style=LEFT, size=(150, -1))
+        self.wids['roi_name'] = SimpleText(roipanel, '[ROI]', style=LEFT, size=(150, -1))
+
+        roisizer.Add(rlabel,                 (0, 0), (1, 1), LEFT, 1)
+        roisizer.Add(tlabel,                 (1, 0), (1, 1), LEFT, 1)
+        roisizer.Add(self.wids['roi_name'],  (2, 0), (1, 1), LEFT, 1)
+
+        opts = {'style': RIGHT, 'size': (100, -1)}
+        for i in range(1, self.nmca+1):
+            l = SimpleText(roipanel, f'MCA {i}', **opts)
+            self.wids[f'ocr{i}'] = o = SimpleText(roipanel, ' ', **opts)
+            self.wids[f'roi{i}'] = r = SimpleText(roipanel, ' ', **opts)
+            o.SetBackgroundColour((220,220,220))
+            r.SetBackgroundColour((220,220,220))
+
+            roisizer.Add(l,  (0, i), (1, 1), style, 1)
+            roisizer.Add(o,  (1, i), (1, 1), style, 1)
+            roisizer.Add(r,  (2, i), (1, 1), style, 1)
+        pack(roipanel, roisizer)
+
         b1 =  Button(pane, 'Start',      size=(90, -1), action=self.onStart)
         b2 =  Button(pane, 'Stop',       size=(90, -1), action=self.onStop)
         b3 =  Button(pane, 'Erase',      size=(90, -1), action=self.onErase)
@@ -470,9 +447,9 @@ class EpicsXRFDisplayFrame(XRFDisplayFrame):
         sta_lab = SimpleText(pane, 'Status :',          size=(100, -1))
         dea_lab = SimpleText(pane, '% Deadtime:',       size=(100, -1))
 
-        psizer = wx.GridBagSizer(5, 5)
+        psizer = wx.GridBagSizer(3, 3)
         psizer.Add(SimpleText(pane, ' MCAs: '),  (0, 0), (1, 1), style, 1)
-        psizer.Add(det_btnpanel,           (0, 1), (2, 1), style, 1)
+        psizer.Add(det_btnpanel,           (0, 1), (3, 1), style, 1)
         psizer.Add(bkg_lab,                (0, 2), (1, 1), style, 1)
         psizer.Add(self.wids['bkg_det'],   (0, 3), (1, 1), style, 1)
         psizer.Add(sum_lab,                (1, 2), (1, 1), style, 1)
@@ -491,6 +468,8 @@ class EpicsXRFDisplayFrame(XRFDisplayFrame):
         psizer.Add(self.wids['det_status'],  (0, 9), (1, 1), style, 1)
         psizer.Add(dea_lab,                  (1, 8), (1, 1), style, 1)
         psizer.Add(self.wids['deadtime'],    (1, 9), (1, 1), style, 1)
+        psizer.Add(roipanel,                 (2, 2), (1, 8), style, 1)
+
         pack(pane, psizer)
         # pane.SetMinSize((500, 53))
         self.det.connect_displays(status=self.wids['det_status'],
@@ -500,7 +479,7 @@ class EpicsXRFDisplayFrame(XRFDisplayFrame):
         self.timer_counter = 0
         self.mca_timer = wx.Timer(self)
         self.Bind(wx.EVT_TIMER, self.UpdateData, self.mca_timer)
-        self.mca_timer.Start(100)
+        self.mca_timer.Start(250)
         return pane
 
     def UpdateData(self, event=None, force=False):
@@ -509,7 +488,6 @@ class EpicsXRFDisplayFrame(XRFDisplayFrame):
             self.show_mca()
         # self.elapsed_real = self.det.elapsed_real
         self.mca.real_time = self.det.elapsed_real
-        # print("Update Data  ", force, self.det.needs_refresh)
 
         if force or self.det.needs_refresh:
             self.det.needs_refresh = False
@@ -529,8 +507,8 @@ class EpicsXRFDisplayFrame(XRFDisplayFrame):
 
             dtime = self.det.get_deadtime(mca=self.det_fore)
             if dtime is not None:
-                self.wids['deadtime'].SetLabel("%.1f" % dtime)
-
+                self.wids['deadtime'].SetLabel(f"{dtime:.1f}")
+            self.wids['deadtime'].SetForegroundColour(warning_color(dtime, 25, 50))
             counts = self.det.get_array(mca=self.det_fore)*1.0
             energy = self.det.get_energy(mca=self.det_fore)
             if max(counts) < 1.0:
@@ -541,7 +519,6 @@ class EpicsXRFDisplayFrame(XRFDisplayFrame):
     def ShowROIStatus(self, left, right, name='', panel=0):
         if left > right:
             return
-        sum = self.ydata[left:right].sum()
 
         try:
             ftime, nframes = self.det.get_frametime()
@@ -550,23 +527,34 @@ class EpicsXRFDisplayFrame(XRFDisplayFrame):
             nframes = self.det.nframes
         self.det.elapsed_real = nframes * ftime
 
+        rfmt = "mca{}: {:8,.0f}"
+
         mca_counts = self.det.mcas[self.det_fore-1].get('VAL')
         sum =  mca_counts[left:right].sum()
-        # print("ROI STATUS ", name, ftime, nframes, sum, cps, mca_counts.sum(),  mca_counts)
+        thissum = 0
+        thisrate = 0
+
         if name in (None, ''):
-            name = 'Selected'
+            name = 'selected'
         else:
-            for roi in self.det.mcas[self.det_fore-1].rois:
-                if name.lower() == roi.name.lower():
-                    try:
-                        sum = roi.sum
-                    except:
-                        pass
-        cps = sum/ftime
-        if cps < 0: cps = 0
-        # print("ROI STATUS ", name, _counts, cps)
-        fmt = " {:s}: Cts={:10,.0f} :{:10,.1f} Hz"
-        self.write_message(fmt.format(name, sum, cps), panel=panel)
+            lname = name.lower()
+            for nmca in range(1, self.nmca+1):
+                counts = self.det.mcas[nmca-1].get('VAL')
+                total = counts.sum()/ftime
+                sum = counts[left:right].sum()
+                rate = sum/ftime
+                self.wids[f'ocr{nmca}'].SetLabel(f'{total:,.0f}')
+                self.wids[f'ocr{nmca}'].SetForegroundColour(warning_color(total, 1.25e6, 2.5e6))
+
+                self.wids[f'roi{nmca}'].SetLabel(f'{rate:,.0f}')
+                self.wids[f'roi{nmca}'].SetForegroundColour(warning_color(rate, 4.0e5, 8.0e5))
+                if self.det_fore == nmca:
+                    thissum, thisrate = sum, rate
+        mfmt = " {:s}: Cts={:10,.0f} :{:10,.1f} Hz"
+        self.write_message(mfmt.format(name, thissum, thisrate), panel=panel)
+        cname = self.wids['roi_name'].GetLabel().strip()
+        if name != cname:
+            self.wids['roi_name'].SetLabel(name)
 
     def onSelectDet(self, event=None, index=0, init=False, **kws):
         if index > 0:
@@ -693,20 +681,34 @@ class EpicsXRFDisplayFrame(XRFDisplayFrame):
         self.onStop()
         XRFDisplayFrame.onExit(self)
 
-class EpicsXRFApp(wx.App, wx.lib.mixins.inspection.InspectionMixin):
-    def __init__(self, **kws):
-        self.kws = kws
-        wx.App.__init__(self)
+class EpicsXRFApp(LarchWxApp):
+    def __init__(self, _larch=None, prefix=None,
+                 det_type='ME-4', ioc_type='Xspress3', nmca=4,
+                 size=(725, 580), environ_file=None,
+                 title='Epics XRF Display', output_title='XRF', **kws):
+        self.prefix = prefix
+        self.det_type = det_type
+        self.ioc_type = ioc_type
+        self.nmca = nmca
+        self.size = size
+        self.environ_file = environ_file
+        self.title = title
+        self.output_title = output_title
+        LarchWxApp.__init__(self, _larch=_larch, **kws)
 
-    def OnInit(self):
-        self.Init()
-        frame = EpicsXRFDisplayFrame(**self.kws) #
+    def createApp(self):
+        frame = EpicsXRFDisplayFrame(prefix=self.prefix,
+                                     det_type=self.det_type,
+                                     ioc_type=self.ioc_type,
+                                     nmca=self.nmca, size=self.size,
+                                     environ_file=self.environ_file,
+                                     title=self.title,
+                                     output_title=self.output_title,
+                                     _larch=self._larch)
         frame.Show()
+        frame.Raise()
         self.SetTopWindow(frame)
         return True
 
 if __name__ == "__main__":
-    # e = EpicsXRFApp(prefix='QX4:', det_type='ME-4',
-    #                amp_type='xspress3', nmca=4)
-
     EpicsXRFApp().MainLoop()

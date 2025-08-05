@@ -28,14 +28,15 @@ import larch
 from larch import Group
 from larch.larchlib import read_workdir, save_workdir
 from larch.utils.strutils import bytes2str
-
-from larch.io import tifffile, nativepath
+from larch.utils import get_cwd
+from larch.wxlib import LarchWxApp
+from larch.io import tifffile
 from larch.xrd import (integrate_xrd,E_from_lambda,xrd1d,read_lambda,
                        calc_cake,twth_from_q,twth_from_d,
                        return_ai,twth_from_xy,q_from_xy,eta_from_xy)
 from .XRDCalibrationFrame import CalibrationPopup
 from .XRDMaskFrame import MaskToolsPopup
-from .XRD1Dviewer import Calc1DPopup
+# from .XRD1Dviewer import Calc1DPopup
 
 ###################################
 
@@ -260,8 +261,8 @@ class XRD2DViewerFrame(wx.Frame):
             img_no = self.ch_img.GetSelection()
             if self.open_image[img_no].iframes > 1:
                 self.hrz_frm_sldr.Enable()
-                self.hrz_frm_sldr.SetRange(0,(self.open_image[img_no].iframes-1))
-                self.hrz_frm_sldr.SetValue(self.open_image[img_no].i)
+                self.hrz_frm_sldr.SetRange(0, int(self.open_image[img_no].iframes-1))
+                self.hrz_frm_sldr.SetValue(int(self.open_image[img_no].i))
                 for btn in self.hrz_frm_btn: btn.Enable()
             else:
                 self.hrz_frm_sldr.Disable()
@@ -271,8 +272,8 @@ class XRD2DViewerFrame(wx.Frame):
 
             if self.open_image[img_no].jframes > 1:
                 self.vrt_frm_sldr.Enable()
-                self.vrt_frm_sldr.SetRange(0,(self.open_image[img_no].jframes-1))
-                self.vrt_frm_sldr.SetValue(self.open_image[img_no].j)
+                self.vrt_frm_sldr.SetRange(0,int(self.open_image[img_no].jframes-1))
+                self.vrt_frm_sldr.SetValue(int(self.open_image[img_no].j))
                 for btn in self.vrt_frm_btn: btn.Enable()
             else:
                 self.vrt_frm_sldr.Disable()
@@ -286,7 +287,7 @@ class XRD2DViewerFrame(wx.Frame):
     def loadIMAGE(self,event=None):
         wildcards = '2DXRD image files (*.*)|*.*|All files (*.*)|*.*'
         dlg = wx.FileDialog(self, message='Choose 2D XRD image',
-                           defaultDir=os.getcwd(),
+                           defaultDir=get_cwd(),
                            wildcard=wildcards, style=wx.FD_OPEN)
 
         path, read = '', False
@@ -365,14 +366,14 @@ class XRD2DViewerFrame(wx.Frame):
 
         if self.open_image[-1].iframes > 1:
             self.hrz_frm_sldr.SetRange(0,(self.open_image[-1].iframes-1))
-            self.hrz_frm_sldr.SetValue(self.open_image[-1].i)
+            self.hrz_frm_sldr.SetValue(int(self.open_image[-1].i))
         else:
             self.hrz_frm_sldr.Disable()
             for btn in self.hrz_frm_btn: btn.Disable()
 
         if self.open_image[-1].jframes > 1:
             self.vrt_frm_sldr.SetRange(0,(self.open_image[-1].jframes-1))
-            self.vrt_frm_sldr.SetValue(self.open_image[-1].j)
+            self.vrt_frm_sldr.SetValue(int(self.open_image[-1].j))
         else:
             self.vrt_frm_sldr.Disable()
             for btn in self.vrt_frm_btn: btn.Disable()
@@ -516,8 +517,8 @@ class XRD2DViewerFrame(wx.Frame):
             self.sldr_bkgd.Enable()
             self.use_bkgd = True
 
-        self.sldr_bkgd.SetRange(0,self.bkgdMAX*SLIDER_SCALE)
-        self.sldr_bkgd.SetValue(self.bkgd_scale*SLIDER_SCALE)
+        self.sldr_bkgd.SetRange(0, int(self.bkgdMAX*SLIDER_SCALE))
+        self.sldr_bkgd.SetValue(int(self.bkgd_scale*SLIDER_SCALE))
 
     def colorIMAGE(self,unzoom=False):
         self.xrd2Dviewer.plot2D.conf.cmap[0] = getattr(colormap, self.color)
@@ -613,11 +614,11 @@ class XRD2DViewerFrame(wx.Frame):
             self.xrd2Dviewer.plot2D.conf.int_hi[0] = img.maxval
         self.xrd2Dviewer.plot2D.redraw()
 
-        self.sldr_cntrst.SetRange(img.minval,img.maxval)
+        self.sldr_cntrst.SetRange(int(img.minval), int(img.maxval))
         if auto_contrast:
             self.sldr_cntrst.SetValue(int(img.maxval*0.4))
         else:
-            self.sldr_cntrst.SetValue(img.maxval)
+            self.sldr_cntrst.SetValue(int(img.maxval))
         self.entr_min.SetValue('%i' % img.minval)
         self.entr_max.SetValue('%i' % img.maxval)
 
@@ -637,7 +638,7 @@ class XRD2DViewerFrame(wx.Frame):
     def saveIMAGE(self,event=None,raw=False):
         wildcards = 'XRD image (*.tiff)|*.tiff|All files (*.*)|*.*'
         dlg = wx.FileDialog(self, 'Save image as...',
-                           defaultDir=os.getcwd(),
+                           defaultDir=get_cwd(),
                            wildcard=wildcards,
                            style=wx.FD_SAVE|wx.FD_OVERWRITE_PROMPT)
 
@@ -654,8 +655,8 @@ class XRD2DViewerFrame(wx.Frame):
                 tifffile.imsave(path,self.plt_img)
 
     def on1DXRD(self,event=None):
-
-        read, save, plot = False, False, False
+        pass
+        """ read, save, plot = False, False, False
         if self.calfile is not None and self.plt_img is not None:
             myDlg = Calc1DPopup(self,self.plt_img)
             if myDlg.ShowModal() == wx.ID_OK:
@@ -679,7 +680,7 @@ class XRD2DViewerFrame(wx.Frame):
             if save:
                 wildcards = '1D XRD file (*.xy)|*.xy|All files (*.*)|*.*'
                 dlg = wx.FileDialog(self, 'Save file as...',
-                                   defaultDir=os.getcwd(),
+                                   defaultDir=get_cwd(),
                                    wildcard=wildcards,
                                    style=wx.FD_SAVE|wx.FD_OVERWRITE_PROMPT)
                 if dlg.ShowModal() == wx.ID_OK:
@@ -734,7 +735,7 @@ class XRD2DViewerFrame(wx.Frame):
                         data1dxrd.xrd_from_2d([q,cnts],'q')
                         self.xrddisplay1D.xrd1Dviewer.add1Ddata(data1dxrd)
                 self.xrddisplay1D.Show()
-
+        """
 
 
 
@@ -795,7 +796,7 @@ class XRD2DViewerFrame(wx.Frame):
 
         wildcards = 'pyFAI calibration file (*.poni)|*.poni|All files (*.*)|*.*'
         dlg = wx.FileDialog(self, message='Choose pyFAI calibration file',
-                           defaultDir=os.getcwd(),
+                           defaultDir=get_cwd(),
                            wildcard=wildcards, style=wx.FD_OPEN)
 
         path, read = None, False
@@ -822,7 +823,7 @@ class XRD2DViewerFrame(wx.Frame):
 
         wildcards = 'XRD background image (*.edf,*.tif,*.tiff)|*.tif;*.tiff;*.edf|All files (*.*)|*.*'
         dlg = wx.FileDialog(self, message='Choose XRD background image',
-                           defaultDir=os.getcwd(),
+                           defaultDir=get_cwd(),
                            wildcard=wildcards, style=wx.FD_OPEN)
 
         path, read = None, False
@@ -847,7 +848,7 @@ class XRD2DViewerFrame(wx.Frame):
 
         wildcards = 'pyFAI mask file (*.edf)|*.edf|All files (*.*)|*.*'
         dlg = wx.FileDialog(self, message='Choose pyFAI mask file',
-                           defaultDir=os.getcwd(),
+                           defaultDir=get_cwd(),
                            wildcard=wildcards, style=wx.FD_OPEN)
 
         path, read = None, False
@@ -903,30 +904,22 @@ class XRD2DViewerFrame(wx.Frame):
 #### MENU FUNCTIONS
     def onFolderSelect(self, evt=None):
         style = wx.DD_DIR_MUST_EXIST|wx.DD_DEFAULT_STYLE
-        dlg = wx.DirDialog(self, 'Select Working Directory:', os.getcwd(),
+        dlg = wx.DirDialog(self, 'Select Working Directory:', get_cwd(),
                            style=style)
 
         if dlg.ShowModal() == wx.ID_OK:
-            basedir = os.path.abspath(str(dlg.GetPath()))
+            basedir = Path(dlg.GetPath()).absolute().as_posix()
             try:
                 if len(basedir)  > 0:
-                    os.chdir(nativepath(basedir))
-                    save_workdir(nativepath(basedir))
+                    os.chdir(basedir)
+                    save_workdir(basedir)
             except OSError:
                 print( 'Changed folder failed')
                 pass
         save_workdir('gsemap.dat')
         dlg.Destroy()
 
-    def onExit(self, event=None):
-
-        dlg = wx.MessageDialog(None, 'Really Quit?', 'Question',
-                               wx.YES_NO | wx.NO_DEFAULT | wx.ICON_QUESTION)
-
-        ret = dlg.ShowModal()
-        if ret != wx.ID_YES:
-            return
-
+    def onClose(self, event=None):
         for image in self.open_image:
             try:
                 image.h5file.close()
@@ -937,6 +930,17 @@ class XRD2DViewerFrame(wx.Frame):
             self.Destroy()
         except:
             pass
+
+
+    def onExit(self, event=None):
+        dlg = wx.MessageDialog(None, 'Really Quit?', 'Question',
+                               wx.YES_NO | wx.NO_DEFAULT | wx.ICON_QUESTION)
+
+        ret = dlg.ShowModal()
+        if ret != wx.ID_YES:
+            return
+        self.onClose()
+
 
 ##############################################
 #### PANEL DEFINITIONS
@@ -1148,7 +1152,7 @@ class XRD2DViewerFrame(wx.Frame):
         hbox_ct2 = wx.BoxSizer(wx.HORIZONTAL)
 
         self.sldr_cntrst = wx.Slider(self.panel, style=wx.SL_LABELS,
-                                     size=(275,-1), maxValue=5e6)
+                                     size=(275,-1), minValue=0, maxValue=5000000)
 
         self.entr_min = wx.TextCtrl(self.panel,  style=wx.TE_PROCESS_ENTER, size=(50,-1))
         self.entr_max = wx.TextCtrl(self.panel,  style=wx.TE_PROCESS_ENTER, size=(80,-1))
@@ -1162,9 +1166,9 @@ class XRD2DViewerFrame(wx.Frame):
         self.btn_ct1.Bind(wx.EVT_BUTTON,partial(self.setContrast,auto_contrast=True) )
 
         ttl_to = wx.StaticText(self.panel, label='to')
-        hbox_ct2.Add(self.entr_min, flag=wx.RIGHT|wx.ALIGN_RIGHT, border=6)
-        hbox_ct2.Add(ttl_to, flag=wx.RIGHT|wx.ALIGN_RIGHT, border=6)
-        hbox_ct2.Add(self.entr_max, flag=wx.RIGHT|wx.ALIGN_RIGHT, border=6)
+        hbox_ct2.Add(self.entr_min, flag=wx.RIGHT, border=6)
+        hbox_ct2.Add(ttl_to, flag=wx.RIGHT, border=6)
+        hbox_ct2.Add(self.entr_max, flag=wx.RIGHT, border=6)
         hbox_ct2.Add(self.btn_ct1, flag=wx.RIGHT,              border=6)
 
         vbox_ct.Add(self.sldr_cntrst, flag=wx.EXPAND|wx.RIGHT,    border=6)
@@ -1215,16 +1219,16 @@ class XRD2DViewerFrame(wx.Frame):
         ## Background
         hbox_bkgd1 = wx.BoxSizer(wx.HORIZONTAL)
         self.btn_bkgd = wx.Button(panel,label='BACKGROUND')
-        self.sldr_bkgd = wx.Slider(self.panel,style=wx.SL_VALUE_LABEL, maxValue=1e3)
+        self.sldr_bkgd = wx.Slider(self.panel,style=wx.SL_VALUE_LABEL, minValue=0, maxValue=1000)
 
         self.sldr_bkgd.Bind(wx.EVT_SLIDER,self.onBkgdScale)
         self.btn_bkgd.Bind(wx.EVT_BUTTON,self.openBkgd)
 
         hbox_bkgd1.Add(self.btn_bkgd,  flag=wx.RIGHT|wx.TOP,                 border=6)
-        hbox_bkgd1.Add(self.sldr_bkgd, flag=wx.EXPAND|wx.ALIGN_RIGHT|wx.TOP, border=6)
+        hbox_bkgd1.Add(self.sldr_bkgd, flag=wx.EXPAND|wx.TOP, border=6)
         vbox.Add(hbox_bkgd1,           flag=wx.TOP|wx.BOTTOM,                border=4)
 
-        self.sldr_bkgd.SetValue(self.bkgd_scale*SLIDER_SCALE)
+        self.sldr_bkgd.SetValue(int(self.bkgd_scale*SLIDER_SCALE))
 
         ###########################
         ## Set defaults
@@ -1270,7 +1274,7 @@ class XRD2DViewerFrame(wx.Frame):
 
         vbox = wx.BoxSizer(wx.VERTICAL)
         vbox.Add(self.xrd2Dviewer,proportion=1,flag=wx.ALL|wx.EXPAND,border = 10)
-        vbox.Add(btnbox,flag=wx.ALL|wx.ALIGN_RIGHT,border = 10)
+        vbox.Add(btnbox,flag=wx.ALL, border = 10)
         return vbox
 
     def QuickButtons(self,panel):
@@ -1388,19 +1392,15 @@ class XRDImg(Group):
         self.maxval = int(maxval)
 
 
-class XRD2DViewer(wx.App):
-    def __init__(self):
-        wx.App.__init__(self)
+class XRD2DViewer(LarchWxApp):
+    def __init__(self, **kws):
+        LarchWxApp.__init__(self, **kws)
 
     def createApp(self):
         frame = XRD2DViewerFrame()
         frame.Show()
         self.SetTopWindow(frame)
-
-    def OnInit(self):
-        self.createApp()
         return True
-
 
 
 if __name__ == '__main__':

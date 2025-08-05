@@ -2,23 +2,38 @@
 '''
 SymbolTable for Larch interpreter
 '''
-from __future__ import print_function
-import os
-import sys
-import types
-import numpy
 import copy
+import numpy
+from pyshortcuts import gformat
 from . import site_config
-from .closure import Closure
 from .utils import fixName, isValidName
 
+def repr_value(val):
+    """render a repr-like value for ndarrays, lists, etc"""
+    if (isinstance(val, numpy.ndarray) and
+            (len(val) > 6 or len(val.shape)>1)):
+        sval = f"shape={val.shape}, type={val.dtype} range=[{gformat(val.min())}:{gformat(val.max())}]"
+    elif isinstance(val, list) and len(val) > 6:
+        sval = f"length={len(val)}: [{val[0]}, {val[1]}, ... {val[-2]}, {val[-1]}]"
+    elif isinstance(val, tuple) and len(val) > 6:
+        sval = f"length={len(val)}: ({val[0]}, {val[1]}, ... {val[-2]}, {val[-1]})"
+    else:
+        try:
+            sval = repr(val)
+        except:
+            sval = val
+    return sval
 
-class Group(object):
+
+class Group():
     """
     Generic Group: a container for variables, modules, and subgroups.
     """
     __private = ('_main', '_larch', '_parents', '__name__', '__doc__',
-                 '__private', '_subgroups', '_members')
+                 '__private', '_subgroups', '_members', '_repr_html_')
+
+    __generic_functions = ('keys', 'values', 'items')
+
     def __init__(self, name=None, **kws):
         if name is None:
             name = hex(id(self))
@@ -27,25 +42,23 @@ class Group(object):
             setattr(self, key, val)
 
     def __len__(self):
-        return max(1, len(dir(self))-1)
+        return len(dir(self))
 
     def __repr__(self):
-        if self.__name__ is not None:
-            return '<Group %s>' % self.__name__
-        return '<Group>'
+        return f"<Group '{self.__name__}'>"
 
     def __copy__(self):
         out = Group()
-        for k, v in self.__dict__.items():
-            if k != '__name__':
-                setattr(out, k,  copy.copy(v))
+        for key, val in self.__dict__.items():
+            if key != '__name__':
+                setattr(out, key,  copy.copy(val))
         return out
 
     def __deepcopy__(self, memo):
         out = Group()
-        for k, v in self.__dict__.items():
-            if k != '__name__':
-                setattr(out, k,  copy.deepcopy(v, memo))
+        for key, val in self.__dict__.items():
+            if key != '__name__':
+                setattr(out, key,  copy.deepcopy(val, memo))
         return out
 
     def __id__(self):
@@ -63,10 +76,36 @@ class Group(object):
         return [key for key in cls_members + dict_keys
                 if (not key.startswith('_SymbolTable_') and
                     not key.startswith('_Group_') and
-                    not key.startswith('_%s_' % cname) and
+                    not key.startswith(f'_{cname}_') and
                     not (key.startswith('__') and key.endswith('__')) and
+                    key not in self.__generic_functions and
                     key not in self.__private)]
 
+    def __getitem__(self, key):
+
+        if isinstance(key, int):
+            raise IndexError("Group does not support Integer indexing")
+
+        return getattr(self, key)
+
+    def __setitem__(self, key, value):
+
+        if isinstance(key, int):
+            raise IndexError("Group does not support Integer indexing")
+
+        return setattr(self, key, value)
+
+    def __iter__(self):
+        return iter(self.keys())
+
+    def keys(self):
+        return self.__dir__()
+
+    def values(self):
+        return [getattr(self, key) for key in self.__dir__()]
+
+    def items(self):
+        return [(key, getattr(self, key)) for key in self.__dir__()]
 
     def _subgroups(self):
         "return list of names of members that are sub groups"
@@ -74,11 +113,26 @@ class Group(object):
 
     def _members(self):
         "return members"
-        r = {}
+        out = {}
         for key in self.__dir__():
             if key in self.__dict__:
-                r[key] = self.__dict__[key]
-        return r
+                out[key] = self.__dict__[key]
+        return out
+
+    def _repr_html_(self):
+        """HTML representation for Jupyter notebook"""
+        html = [f"Group {self.__name__}", "<table>",
+                "<tr><td><b>Attribute</b></td><td><b>Type</b></td>",
+                "<td><b>Value</b></td></tr>"]
+        attrs = self.__dir__()
+        for attr in self.__dir__():
+            obj = getattr(self, attr)
+            atype = type(obj).__name__
+            sval = repr_value(obj)
+            html.append(f"<tr><td>{attr}</td><td><i>{atype}</i></td><td>{sval}</td></tr>")
+        html.append("</table>")
+        return '\n'.join(html)
+
 
 def isgroup(grp, *args):
     """tests if input is a Group
@@ -100,7 +154,7 @@ def isgroup(grp, *args):
 class InvalidName:
     """ used to create a value that will NEVER be a useful symbol.
     symboltable._lookup() uses this to check for invalid names"""
-    pass
+
 
 GroupDocs = {}
 GroupDocs['_sys'] = """
@@ -128,7 +182,7 @@ class SymbolTable(Group):
                 'has_symbol', 'has_group', 'get_group',
                 'create_group', 'new_group', 'isgroup',
                 'get_symbol', 'set_symbol',  'del_symbol',
-                'get_parent', 'add_plugin', '_path', '__parents')
+                'get_parent', '_path', '__parents')
 
     def __init__(self, larch=None):
         Group.__init__(self, name=self.top_group)
@@ -140,7 +194,6 @@ class SymbolTable(Group):
             thisgroup = Group(name=gname)
             if gname in GroupDocs:
                 thisgroup.__doc__ = GroupDocs[gname]
-
             setattr(self, gname, thisgroup)
 
         self._sys.frames      = []
@@ -151,24 +204,9 @@ class SymbolTable(Group):
         self._sys.moduleGroup = self
         self._sys.__cache__  = [None]*4
         self._sys.saverestore_groups = []
-        for g in self.core_groups:
-            self._sys.searchGroups.append(g)
+        for grp in self.core_groups:
+            self._sys.searchGroups.append(grp)
         self._sys.core_groups = tuple(self._sys.searchGroups[:])
-
-        self.__callbacks = {}
-        orig_sys_path = sys.path[:]
-
-        if site_config.modules_path is not None:
-            for idir in site_config.modules_path:
-                idirfull = os.path.abspath(idir)
-                if idirfull not in self._sys.path and os.path.exists(idirfull):
-                    self._sys.path.append(idirfull)
-
-        sys.path = self._sys.path[:]
-        for idir in orig_sys_path:
-            idirfull = os.path.abspath(idir)
-            if idirfull not in sys.path:
-                sys.path.append(idirfull)
 
         self._sys.modules = {'_main':self}
         for gname in self.core_groups:
@@ -178,15 +216,13 @@ class SymbolTable(Group):
         self._sys.config = Group(home_dir    = site_config.home_dir,
                                  history_file= site_config.history_file,
                                  init_files  = site_config.init_files,
-                                 modules_path= site_config.modules_path,
-                                 plugins_path= site_config.plugins_path,
-                                 user_larchdir= site_config.usr_larchdir,
-                                 larch_version= site_config.larch_version)
+                                 user_larchdir= site_config.user_larchdir,
+                                 larch_version= site_config.larch_version,
+                                 release_version = site_config.larch_release_version)
 
     def save_frame(self):
         " save current local/module group"
-        self._sys.frames.append((self._sys.localGroup,
-                                 self._sys.moduleGroup))
+        self._sys.frames.append((self._sys.localGroup, self._sys.moduleGroup))
 
     def restore_frame(self):
         "restore last saved local/module group"
@@ -235,7 +271,7 @@ class SymbolTable(Group):
         if sys.moduleGroup is None:
             sys.moduleGroup = self.top_group
         if sys.localGroup is None:
-            sys.localGroup = self.moduleGroup
+            sys.localGroup = sys.moduleGroup
 
         cache[0] = sys.localGroup
         cache[1] = sys.moduleGroup
@@ -294,7 +330,8 @@ class SymbolTable(Group):
         returns symbol given symbol name,
         creating symbol if needed (and create=True)"""
         debug = False # not ('force'in name)
-        if debug:  print( '====\nLOOKUP ', name)
+        if debug:
+            print( '====\nLOOKUP ', name)
         searchGroups = self._fix_searchGroups()
         self.__parents = []
         if self not in searchGroups:
@@ -313,8 +350,8 @@ class SymbolTable(Group):
 
         # more complex case: not immediately found in Local or Module Group
         parts.reverse()
-        top   = parts.pop()
-        out   = self.__invalid_name
+        top = parts.pop()
+        out = self.__invalid_name
         if top == self.top_group:
             out = self
         else:
@@ -323,7 +360,7 @@ class SymbolTable(Group):
                     self.__parents.append(grp)
                     out = getattr(grp, top)
         if out is self.__invalid_name:
-            raise NameError("'%s' is not defined" % name)
+            raise NameError(f"'{name}' is not defined")
 
         if len(parts) == 0:
             return out
@@ -340,19 +377,19 @@ class SymbolTable(Group):
                 out = getattr(out, prt)
             else:
                 raise LookupError(
-                    "cannot locate member '%s' of '%s'" % (prt,out))
+                    f"cannot locate member '{prt}' of '{out}'")
         return out
 
     def has_symbol(self, symname):
         try:
-            g = self.get_symbol(symname)
+            _ = self.get_symbol(symname)
             return True
         except (LookupError, NameError, ValueError):
             return False
 
     def has_group(self, gname):
         try:
-            g = self.get_group(gname)
+            _ = self.get_group(gname)
             return True
         except (NameError, LookupError):
             return False
@@ -366,9 +403,7 @@ class SymbolTable(Group):
         sym = self._lookup(gname, create=False)
         if isgroup(sym):
             return sym
-        else:
-            raise LookupError(
-                "symbol '%s' found, but not a group" % (gname))
+        raise LookupError(f"symbol '{gname}' found, but not a group")
 
     def create_group(self, **kw):
         "create a new Group, not placed anywhere in symbol table"
@@ -393,7 +428,7 @@ class SymbolTable(Group):
 
         for n in name.split('.'):
             if not isValidName(n):
-                raise SyntaxError("invalid symbol name '%s'" % n)
+                raise SyntaxError(f"invalid symbol name '{n}'")
             names.append(n)
 
         child = names.pop()
@@ -402,52 +437,18 @@ class SymbolTable(Group):
                 grp = getattr(grp, nam)
                 if not isgroup(grp):
                     raise ValueError(
-                "cannot create subgroup of non-group '%s'" % grp)
+                        f"cannot create subgroup of non-group '{grp}'")
             else:
                 setattr(grp, nam, Group())
 
         setattr(grp, child, value)
-        if (grp, child) in self.__callbacks:
-            for func, args, kws in self.__callbacks[(grp, child)]:
-                kws.update({'group': grp, 'value': value,
-                            'symbolname': child})
-                func(*args, **kws)
-        return getattr(grp, child)
+        return value
 
     def del_symbol(self, name):
         "delete a symbol"
         sym = self._lookup(name, create=False)
         parent, child = self.get_parent(name)
-        self.clear_callbacks(name)
         delattr(parent, child)
-
-    def clear_callbacks(self, name, index=None):
-        """clear 1 or all callbacks for a symbol
-        """
-        parent, child = self.get_parent(name)
-        if child is not None and (parent, child) in self.__callbacks:
-            if index is not None and index <= len(self.__callbacks[(parent, child)]):
-                self.__callbacks[(parent, child)].pop(index)
-            else:
-                while self.__callbacks[(parent, child)]:
-                    self.__callbacks[(parent, child)].pop()
-
-    def add_callback(self, name, func, args=None, kws=None):
-        """set a callback to be called when set_symbol() is called
-        for a named variable
-        """
-        try:
-            var = self.get_symbol(name)
-        except NameError:
-            raise NameError(
-                "cannot locate symbol '%s' for callback" % (name))
-        key = self.get_parent(name)
-        if key not in self.__callbacks:
-            self.__callbacks[key] = []
-        if args is None: args = ()
-        if kws is None: kws = {}
-
-        self.__callbacks[key].append((func, args, kws))
 
     def get_parent(self, name):
         """return parent group, child name for an absolute symbol name
@@ -463,55 +464,6 @@ class SymbolTable(Group):
             sym = self._lookup('.'.join(tnam))
         return sym, child
 
-    def add_plugin(self, plugin, on_error, **kws):
-        """Add a plugin: a module that includes a
-        registerLarchPlugin function that returns
-        larch_group_name, dict_of_symbol/functions
-        """
-        if not isinstance(plugin, types.ModuleType):
-            on_error("%s is not a valid larch plugin" % repr(plugin))
-
-        group_registrar = getattr(plugin, 'registerLarchGroups', None)
-        if callable(group_registrar):
-            savegroups = group_registrar()
-            for group in savegroups:
-                self._sys.saverestore_groups.append(group)
-
-        registrar = getattr(plugin, 'registerLarchPlugin', None)
-        if registrar is None:
-            return
-
-        groupname, syms = registrar()
-        if not isinstance(syms, dict):
-            raise ValueError('add_plugin requires dictionary of plugins')
-
-        if not self.has_group(groupname):
-            self.new_group(groupname)
-
-        if groupname not in self._sys.searchGroups:
-            self._sys.searchGroups.append(groupname)
-        self._fix_searchGroups(force=True)
-
-        for key, val in syms.items():
-            if hasattr(val, '__call__') and hasattr(val, '__code__'): # is a function
-                # test whether plugin func has a '_larch' kw arg
-                #    __code__.co_flags & 8 == 'uses **kws'
-                kws.update({'func': val, '_name':key})
-                try:
-                    nvars = val.__code__.co_argcount
-                    if ((val.__code__.co_flags &8 != 0) or
-                        '_larch' in val.__code__.co_varnames[:nvars]):
-                        kws.update({'_larch':  self._larch})
-                    val = Closure(**kws)
-                except AttributeError: # cannot make a closure
-                    pass
-            self.set_symbol("%s.%s" % (groupname, key), val)
-
-        plugin_init = getattr(plugin, 'initializeLarchPlugin', None)
-        if plugin_init is not None:
-            plugin_init(_larch=self._larch)
-        return (groupname, syms)
-
     def show_group(self, groupname):
         """display group members --- simple version for tests"""
         out = []
@@ -520,17 +472,11 @@ class SymbolTable(Group):
         except (NameError, LookupError):
             return 'Group %s not found' % groupname
 
-        title = group.__name__
         members = dir(group)
-        out = ['== %s: %i symbols ==' % (title, len(members))]
+        out = ['f== {group.__name__}: {len(members)} symbols ==']
         for item in members:
             obj = getattr(group, item)
-            dval = None
-            if isinstance(obj, numpy.ndarray):
-                if len(obj) > 10 or len(obj.shape)>1:
-                    dval = "array<shape=%s, type=%s>" % (repr(obj.shape),
-                                                         repr(obj.dtype))
-            if dval is None:
-                dval = repr(obj)
-            out.append('  %s: %s' % (item, dval))
-        self._larch.writer.write("%s\n" % '\n'.join(out))
+            dval = repr_value(obj)
+            out.append(f'  {item}: {dval}')
+        out.append('\n')
+        self._larch.writer.write('\n'.join(out))

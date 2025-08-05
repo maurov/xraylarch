@@ -1,4 +1,3 @@
-
 from collections import namedtuple
 import time
 import json
@@ -8,16 +7,15 @@ from scipy.optimize import nnls
 
 
 from lmfit import  Parameters, minimize, fit_report
-from lmfit.printfuncs import gformat
 
 from xraydb import (material_mu, mu_elam, ck_probability, xray_edge,
                     xray_edges, xray_lines, xray_line)
 from xraydb.xray import XrayLine
 
 from .. import Group
-from ..math import index_of, interp, savitzky_golay, hypermet, erfc
+from ..math import index_of, interp, interp1d, savitzky_golay, hypermet, erfc
 from ..xafs import ftwindow
-from ..utils import group2dict, json_dump, json_load
+from ..utils import group2dict, json_dump, json_load, gformat, unixpath
 
 xrf_prediction = namedtuple("xrf_prediction", ("weights", "total"))
 xrf_peak = namedtuple('xrf_peak', ('name', 'amplitude', 'center', 'step',
@@ -27,11 +25,8 @@ xrf_peak = namedtuple('xrf_peak', ('name', 'amplitude', 'center', 'step',
 
 predict_methods = {'lstsq': lstsq, 'nnls': nnls}
 
-####
 # Note on units:  energies are in keV, lengths in cm
-#
-####
-HAS_PINT = False
+
 
 # note on Fano Factors
 # efano = (energy to create e-h pair)  * FanoFactor
@@ -40,8 +35,7 @@ HAS_PINT = False
 #    Ge              3.0               0.130      0.000 3900
 FanoFactors = {'Si':  0.4209e-3, 'Ge': 0.3900e-3}
 
-def is_pint_quantity(val):
-    return HAS_PINT and isinstance(val, pint.quantity._Quantity)
+XRAY_EDGES = ('M5', 'M4', 'M3', 'M2', 'M1', 'L3', 'L2', 'L1', 'K')
 
 class XRF_Material:
     def __init__(self, material='Si', thickness=0.050, density=None,
@@ -50,10 +44,6 @@ class XRF_Material:
         self.density = density
         self.thickness_units = thickness_units
         self.thickness = thickness
-        if HAS_PINT:
-            self.thickness_units = getattr(pint.UnitRegistry(), thickness_units)
-            self.thickness = thickness * self.thickness_units
-
         self.mu_total = self.mu_photo = None
 
     def calc_mu(self, energy):
@@ -72,7 +62,7 @@ class XRF_Material:
         Arguments
         ----------
         energy      float or ndarray  energy (keV) of X-ray
-        thicknesss  float or pint.Quantity   material thickness (cm)
+        thicknesss  float   material thickness (cm)
 
         Returns
         -------
@@ -85,10 +75,8 @@ class XRF_Material:
         mu = self.mu_total
         if kind == 'photo':
             mu = self.mu_photo
-        if is_pint_quantity(thickness):
-            t = thickness.to('cm').magnitude
-        else:
-            t = 0.1*thickness
+
+        t = 0.1*thickness
         return (1.0 - np.exp(-t*mu))
 
     def transmission(self, energy, thickness=None, kind='total'):
@@ -97,7 +85,7 @@ class XRF_Material:
         Arguments
         ---------
         energy      float or ndarray energy (keV) of X-ray
-        thicknesss  float or pint.Quantity   material thickness (cm)
+        thicknesss  float   material thickness (cm)
 
         Returns
         -------
@@ -111,138 +99,94 @@ class XRF_Material:
         mu = self.mu_total
         if kind == 'photo':
             mu = self.mu_photo
-        if is_pint_quantity(thickness):
-            t = thickness.to('cm').magnitude
-        else:
-            t = 0.1*thickness
+
+        t = 0.1*thickness
         return np.exp(-t*mu)
 
 
 class XRF_Element:
-    def __init__(self, symbol, xray_energy=None, energy_min=1.5,
-                 overlap_energy=None):
+    def __init__(self, symbol, xray_energy=10, energy_min=1.5):
+        """get Xray emission lines for an element"""
         self.symbol = symbol
+
+        # note: 'xray_energy' and 'energy_min' are in keV,
+        # most of this code works in eV!
+        if xray_energy is None:     xray_energy = 30.0
+        if energy_min is None:      energy_min = 1.5
         self.xray_energy = xray_energy
-        self.mu = 1.0
-        self.edges = ['K']
-        self.fyields = {}
-        if xray_energy is not None:
-            self.mu = mu_elam(symbol, 1000*xray_energy, kind='photo')
+        self.energy_min = energy_min
 
-            self.edges = []
-            for ename, xedge in xray_edges(self.symbol).items():
-                if ename.lower() in ('k', 'l1', 'l2', 'l3', 'm5'):
-                    edge_kev = 0.001*xedge.energy
-                    if (edge_kev < xray_energy and
-                        edge_kev > energy_min):
-                        self.edges.append(ename)
-                        self.fyields[ename] = xedge.fyield
+        en_xray_ev = xray_energy * 1000.0
+        en_low_ev  = energy_min * 1000.0
+        self.mu = mu_elam(symbol, en_xray_ev, kind='photo')
+        self.edges = []
+        self.fyields = {edge: 0.0 for edge in XRAY_EDGES}
+        self.taus = {edge: 0.0 for edge in XRAY_EDGES}
+        jumps = {}
+        for ename, xedge in xray_edges(self.symbol).items():
+            if ename.lower() in ('k', 'l1', 'l2', 'l3', 'm5'):
+                if (xedge.energy < en_xray_ev and xedge.energy > en_low_ev):
+                    self.edges.append(ename)
+                    self.fyields[ename] = xedge.fyield
+                    jumps[ename] = xedge.jump_ratio
 
-        # currently, we consider only one edge per element
-        if 'K' in self.edges:
-            self.edges = ['K']
-        if 'L3' in self.edges:
-            tmp = []
-            for ename in self.edges:
-                if ename.lower().startswith('l'):
-                    tmp.append(ename)
-            self.edges = tmp
-
-        # apply CK corrections to fluorescent yields
-        if 'L3' in self.edges:
-            nlines = 1.0
-            ck13 = ck_probability(symbol, 'L1', 'L3')
-            ck12 = ck_probability(symbol, 'L1', 'L2')
-            ck23 = ck_probability(symbol, 'L2', 'L3')
-            fy3  = self.fyields['L3']
-            fy2  = self.fyields.get('L2', 0)
-            fy1  = self.fyields.get('L1', 0)
-            if 'L2' in self.edges:
-                nlines = 2.0
-                fy3 = fy3 + fy2*ck23
-                fy2 = fy2 * (1 - ck23)
-                if 'L1' in self.edges:
-                    nlines = 3.0
-                    fy3 = fy3 + fy1 * (ck13 + ck12*ck23)
-                    fy2 = fy2 + fy1 * ck12
-                    fy1 = fy1 * (1 - ck12 - ck13 - ck12*ck23)
-                    self.fyields['L1'] = fy1
-                self.fyields['L2'] = fy2
-            self.fyields['L3'] = fy3/nlines
-            self.fyields['L2'] = fy2/nlines
-            self.fyields['L1'] = fy1/nlines
+        # tau is sub-shell strength
+        for ename in XRAY_EDGES:
+            if ename in self.edges and ename in jumps:
+                jump = max(1.000001, jumps[ename])
+                self.taus[ename] = jump - 1.0
+                for key in self.taus:
+                    self.taus[key] = self.taus[key]/jump
 
         # look up X-ray lines, keep track of very close lines
-        # so that they can be consolidate
+        # so that they can be consolidated
         # slightly confusing (and working with XrayLine energies in ev)
         self.lines = {}
-        self.all_lines = {}
-        energy0 = None
+        all_lines = {}
+        en_max = 0
         for ename in self.edges:
             for key, xline in xray_lines(symbol, ename).items():
-                self.all_lines[key] = xline
-                if xline.intensity > 0.002:
-                    self.lines[key] = xline
-                    if energy0 is None:
-                        energy0 = xline.energy
+                all_lines[key] = xline
+                en_max = max(en_max, xline.energy)
 
-        if overlap_energy is None:
-            if xray_energy is None: xray_energy = 10.0
-            if energy0 is not None: xray_energy = energy0
-            # note: at this point xray_energy is in keV
-            overlap_energy = 5.0*(2+np.sqrt(5 + xray_energy))
+        if en_max < 100:
+            en_max = en_xray_ev
+        overlap_energy = en_max*0.001    # should be around 1 to 10 eV.
 
-        # collect lines from the same initial level that are close in energy
-        nlines = len(self.lines)
-        combos = [[] for k in range(nlines)]
-        comboe = [-1 for k in range(nlines)]
-        combol = [None for k in range(nlines)]
-        for key, xline in self.lines.items():
-            assigned = False
-            for i, en in enumerate(comboe):
-                if (abs(0.001*xline.energy - en) < overlap_energy and
-                    xline.initial_level == combol[i]):
-                    combos[i].append(key)
-                    assigned = True
-                    break
-            if not assigned:
-                for k in range(nlines):
-                    if comboe[k] < 0:
-                        break
-                combol[k] = xline.initial_level
-                comboe[k] = xline.energy
-                combos[k].append(key)
+        dups = {}
+        for i, key in enumerate(all_lines):
+            xline = all_lines[key]
+            dup_found = False
+            for okey, oline in self.lines.items():
+                if (okey != key and ((xline.energy-oline.energy) < overlap_energy) and
+                    xline.initial_level == oline.initial_level):
+                    dups[key] = okey
+            if key not in dups:
+                self.lines[key] = xline
 
-        # consolidate overlapping X-ray lines
-        for comps in combos:
-            if len(comps) > 0:
-                key = comps[0]
-                l0 = self.lines.pop(key)
-                ilevel = l0.initial_level
-                iweight = l0.intensity
-                flevel = [l0.final_level]
-                en = [l0.energy]
-                wt = [l0.intensity]
-                for other in comps[1:]:
-                    lx = self.lines.pop(other)
-                    if lx.intensity > iweight:
-                        iweight = lx.intensity
-                        ilevel  = lx.initial_level
-                    flevel.append(lx.final_level)
-                    en.append(lx.energy)
-                    wt.append(lx.intensity)
-                wt = np.array(wt)
-                en = np.array(en)
-                flevel = ', '.join(flevel)
-                if len(comps) > 1:
-                    newkey = key.replace('1', '').replace('2', '').replace('3', '')
-                    newkey = newkey.replace('4', '').replace('5', '').replace(',', '')
-                    if newkey not in self.lines:
-                        key = newkey
-                self.lines[key] = XrayLine(energy=(en*wt).sum()/wt.sum(),
-                                           intensity=wt.sum(),
-                                           initial_level=ilevel,
-                                           final_level=flevel)
+        for key, dest in dups.items():
+            if dest in self.lines:
+                w1, w2 = all_lines[key].intensity,   all_lines[dest].intensity
+                e1, e2 = all_lines[key].energy,      all_lines[dest].energy
+                f1, f2 = all_lines[key].final_level, all_lines[dest].final_level
+                wt = w1+w2
+                en = (e1*w1 + e2*w2)/(wt)
+
+                newkey = "%s,%s" % (key, dest)
+                if key[:2] == dest[:2]:
+                    newkey = "%s,%s" % (key, dest[2:])
+
+                flevel = "%s,%s" % (f1, f2)
+                if f1[0] == f2[0]:
+                    flevel = "%s,%s" % (f1, f2[1:])
+
+                self.lines.pop(dest)
+                self.lines[newkey] = XrayLine(energy=en, intensity=wt,
+                                              initial_level=all_lines[key].initial_level,
+                                              final_level=flevel)
+                for k, d in dups.items():
+                    if d == dest:
+                        dups[k] = newkey
 
 
 class XRF_Model:
@@ -257,12 +201,12 @@ class XRF_Model:
     """
     def __init__(self, xray_energy=None, energy_min=1.5, energy_max=30.,
                  count_time=1, bgr=None, iter_callback=None, **kws):
-
         self.xray_energy = xray_energy
         self.energy_min = energy_min
         self.energy_max = energy_max
         self.count_time = count_time
         self.iter_callback = None
+        self.fit_in_progress = False
         self.params = Parameters()
         self.elements = []
         self.scatter = []
@@ -273,8 +217,13 @@ class XRF_Model:
         self.matrix = None
         self.matrix_atten = 1.0
         self.filters = []
+        self.det_atten = self.filt_atten = self.escape_amp = 0.0
+        self.mu_lines = {}
+        self.mu_energies = []
         self.fit_iter = 0
-        self.fit_toler = 1.e-5
+        self.fit_toler = 1.e-4
+        self.fit_step = 1.e-4
+        self.max_nfev = 1000
         self.fit_log = False
         self.bgr = None
         self.use_pileup = False
@@ -380,8 +329,8 @@ class XRF_Model:
         atten = 1.0
         if self.matrix is not None:
             ixray_en = index_of(energy, self.xray_energy)
-            print("MATRIX ", ixray_en, self.matrix)
-           # layer_trans = self.matrix.transmission(energy) # transmission through layer
+            # print("MATRIX ", ixray_en, self.matrix)
+            # layer_trans = self.matrix.transmission(energy) # transmission through layer
             # incid_trans = layer_trans[ixray_en] # incident beam trans to lower layers
             # ncid_absor = 1.0 - incid_trans     # incident beam absorption by layer
             # atten = layer_trans * incid_absor
@@ -426,40 +375,65 @@ class XRF_Model:
         beta = pars['peak_beta']
         gamma = pars['peak_gamma']
 
-        # detector attenuation
-        atten = self.detector.absorbance(energy, thickness=pars['det_thickness'])
+        # escape: calc only if needed
+        if ((not self.fit_in_progress) or
+            self.params['det_thickness'].vary or
+            self.params['escape_amp'].vary):
+            if self.escape_scale is None:
+                self.calc_escape_scale(energy, thickness=pars['det_thickness'])
+            self.escape_amp = pars.get('escape_amp', 0.0) * self.escape_scale
+            if not self.use_escape:
+                self.escape_amp = 0
+        # detector attenuation: calc only if needed
+        if (not self.fit_in_progress) or self.params['det_thickness'].vary:
+            self.det_atten = self.detector.absorbance(energy, thickness=pars['det_thickness'])
+        # filter attenuation: calc only if needed
+        filt_pars = [self.params['filterlen_%s' % f.material] for f in self.filters]
+        if (not self.fit_in_progress) or any([f.vary for f in filt_pars]):
+            self.filt_atten =  np.ones(len(energy))
+            for f in self.filters:
+                thickness = pars.get('filterlen_%s' % f.material, None)
+                if thickness is not None and int(thickness*1e6) > 1:
+                    fx = f.transmission(energy, thickness=thickness)
+                    self.filt_atten *= fx
 
-        # filters
-        for f in self.filters:
-           thickness = pars.get('filterlen_%s' % f.material, None)
-           if thickness is not None and int(thickness*1e6) > 1:
-               atten *= f.transmission(energy, thickness=thickness)
-        self.atten = atten
+        self.atten = self.det_atten * self.filt_atten
+        # matrix corrections #1: get X-ray line energies, only if needed
+        if ((not self.fit_in_progress) or len(self.mu_energies)==0):
+            self.mu_lines = {}
+            self.mu_energies = []
+            for elem in self.elements:
+                for key, line in elem.lines.items():
+                    self.mu_lines[f'{elem.symbol:s}_{key:s}'] = line.energy
+                    self.mu_energies.append(line.energy)
+
+            self.mu_energies.append(1000*self.xray_energy)
+            self.mu_energies = np.array(self.mu_energies)
+        # print("Mu energies ", self.mu_energies, len(self.mu_energies))
         # matrix
         # if self.matrix_atten is None:
         #     self.calc_matrix_attenuation(energy)
         # atten *= self.matrix_atten
-        if self.use_escape:
-            if self.escape_scale is None:
-                self.calc_escape_scale(energy, thickness=pars['det_thickness'])
-            escape_amp = pars.get('escape_amp', 0.0) * self.escape_scale
 
+        nlines = 0
         for elem in self.elements:
             comp = 0. * energy
             amp = pars.get('amp_%s' % elem.symbol.lower(), None)
             if amp is None:
                 continue
             for key, line in elem.lines.items():
+                ilevel = line.initial_level
                 ecen = 0.001*line.energy
-                line_amp = line.intensity * elem.mu * elem.fyields[line.initial_level]
+                nlines += 1
+                line_amp = (line.intensity * elem.mu *
+                            elem.fyields[ilevel] * elem.taus[ilevel])
                 sigma = self.det_sigma(ecen, det_noise)
                 comp += hypermet(energy, amplitude=line_amp, center=ecen,
                                  sigma=sigma, step=step, tail=tail,
                                  beta=beta, gamma=gamma)
-            comp *= amp * atten * self.count_time
-            if self.use_escape:
-                comp += escape_amp * interp(energy-self.escape_energy, comp, energy)
-
+            comp *= amp * self.atten * self.count_time
+            comp += self.escape_amp * interp1d(energy-self.escape_energy, comp, energy)
+            comp[np.where(np.isnan(comp))] = 0.0
             self.comps[elem.symbol] = comp
             self.eigenvalues[elem.symbol] = amp
 
@@ -478,22 +452,19 @@ class XRF_Model:
             comp = hypermet(energy, amplitude=1.0, center=ecen,
                             sigma=sigma, step=step, tail=tail, beta=beta,
                             gamma=gamma)
-            comp *= amp * atten * self.count_time
-            if self.use_escape:
-                comp += escape_amp * interp(energy-self.escape_energy, comp, energy)
+            comp *= amp * self.atten * self.count_time
+            comp += self.escape_amp * interp1d(energy-self.escape_energy, comp, energy)
+            comp[np.where(np.isnan(comp))] = 0.0
             self.comps[p] = comp
             self.eigenvalues[p] = amp
-
         if self.bgr is not None:
             bgr_amp = pars.get('background_amp', 0.0)
             self.comps['background'] = bgr_amp * self.bgr
             self.eigenvalues['background'] = bgr_amp
-
         # calculate total spectrum
         total = 0. * energy
         for comp in self.comps.values():
             total += comp
-
         if self.use_pileup:
             pamp = pars.get('pileup_amp', 0.0)
             npts = len(energy)
@@ -501,7 +472,6 @@ class XRF_Model:
             self.comps['pileup'] = pileup
             self.eigenvalues['pileup'] = pamp
             total += pileup
-
         # remove tiny values so that log plots are usable
         floor = 1.e-10*max(total)
         total[np.where(total<floor)] = floor
@@ -515,7 +485,7 @@ class XRF_Model:
         self.fit_iter += 1
         model = self.calc_spectrum(self.best_en, params=params)
         if callable(self.iter_callback):
-            self.iter_callback(iter=self.fit_iter, pars=pars)
+            self.iter_callback(iter=self.fit_iter, pars=params)
         return ((data - model) * self.fit_weight)[self.imin:self.imax]
 
     def set_fit_weight(self, energy, counts, emin, emax, ewid=0.050):
@@ -524,10 +494,18 @@ class XRF_Model:
         """
         ewin = ftwindow(energy, xmin=emin, xmax=emax, dx=ewid, window='hanning')
         self.fit_window = ewin
-        fit_wt = 0.5 + savitzky_golay(np.sqrt(counts+1.0), 25, 1)
+        fit_wt = 0.1 + savitzky_golay( (counts+1.0)**(2/3.0), 15, 1)
         self.fit_weight = 1.0/fit_wt
 
-    def fit_spectrum(self, mca, energy_min=None, energy_max=None):
+    def fit_spectrum(self, mca, energy_min=None, energy_max=None,
+                     fit_toler=None, fit_step=None, max_nfev=None):
+        if fit_toler is not None:
+            self.fit_toler = max(1.e-7, min(0.001, fit_toler))
+        if fit_step is not None:
+            self.fit_step = max(1.e-7, min(0.1, fit_step))
+        if max_nfev is not None:
+            self.max_nfev = max(200, min(12000, max_nfev))
+
         self.mca = mca
         work_energy = 1.0*mca.energy
         work_counts = 1.0*mca.counts
@@ -560,17 +538,21 @@ class XRF_Model:
         for f in self.filters:
             f.mu_total = None
 
+        self.fit_in_progress = False
         self.init_fit = self.calc_spectrum(work_energy, params=self.params)
         index = np.arange(len(work_counts))
         userkws = dict(data=work_counts, index=index)
 
         tol = self.fit_toler
+        self.fit_in_progress = True
         self.result = minimize(self.__resid, self.params, kws=userkws,
-                               method='leastsq', maxfev=10000, scale_covar=True,
-                               gtol=tol, ftol=tol, epsfcn=1.e-5)
+                               method='leastsq', maxfev=self.max_nfev,
+                               scale_covar=True, epsfcn=self.fit_step,
+                               gtol=tol, ftol=tol, xtol=tol)
 
         self.fit_report = fit_report(self.result, min_correl=0.5)
         pars = self.result.params
+        self.fit_in_progress = False
 
         self.best_en = (pars['cal_offset'] + pars['cal_slope'] * index +
                         pars['cal_quad'] * index**2)
@@ -607,8 +589,7 @@ class XRF_Model:
                      'scatter', 'script', 'transfer_matrix', 'xray_energy'):
             setattr(out, attr, getattr(self, attr, None))
 
-        elem_attrs = ('all_lines', 'edges', 'fyields', 'lines', 'mu',
-                      'symbol', 'xray_energy')
+        elem_attrs = ('edges', 'fyields', 'lines', 'mu', 'symbol', 'xray_energy')
         out.elements = []
         for el in self.elements:
             out.elements.append({attr: getattr(el, attr) for attr in elem_attrs})
@@ -644,7 +625,7 @@ class XRFFitResult(Group):
             if key == 'mca':
                 val = val.dump_mcafile()
             tmp[key] = val
-        json_dump(tmp, filename)
+        json_dump(tmp, unixpath(filename))
 
     def load(self, filename):
         from ..io import GSEMCA_File

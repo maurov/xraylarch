@@ -2,51 +2,33 @@
 """
 Helper classes for larch interpreter
 """
-from __future__ import division
-import sys, os, time
+import sys
+import os
+from datetime import datetime
 import ast
-import numpy as np
 import traceback
+import toml
 import inspect
-from collections import OrderedDict
+from collections import namedtuple
+from pathlib import Path
+
 import ctypes
 import ctypes.util
 
 from .symboltable import Group, isgroup
-from .site_config import usr_larchdir
+from .site_config import user_larchdir
 from .closure import Closure
-from .utils import uname, bindir
+from .utils import uname, bindir, get_cwd, read_textfile
 
 HAS_TERMCOLOR = False
 try:
     from termcolor import colored
-    if uname == 'win':
-        # HACK (hopefully temporary):
-        # disable color output for Windows command terminal
-        # because it interferes with wx event loop.
-        import CannotUseTermcolorOnWindowsWithWx
-        # os.environ.pop('TERM')
-        # import colorama
-        # colorama.init()
     HAS_TERMCOLOR = True
 except ImportError:
     HAS_TERMCOLOR = False
 
-HAS_YAML = False
-try:
-    import yaml
-    HAS_YAML = True
-except ImportError:
-    HAS_YAML = False
-
-class LarchPluginException(Exception):
-    """Exception with Larch Plugin"""
-    def __init__(self, msg):
-        Exception.__init__(self)
-        self.msg = msg
-
-    def __str__(self):
-        return "\n%s" % (self.msg)
+if uname == 'win':
+    HAS_TERMCOLOR = False
 
 class Empty:
     def __nonzero__(self): return False
@@ -145,9 +127,9 @@ class LarchExceptionHolder:
         for tb in traceback.extract_tb(self.exc_info[2]):
             if not (sys.prefix in tb[0] and
                     ('ast.py' in tb[0] or
-                     os.path.join('larch', 'utils') in tb[0] or
-                     os.path.join('larch', 'interpreter') in tb[0] or
-                     os.path.join('larch', 'symboltable') in tb[0])):
+                     Path('larch', 'utils').as_posix() in tb[0] or
+                     Path('larch', 'interpreter').as_posix() in tb[0] or
+                     Path('larch', 'symboltable').as_posix() in tb[0])):
                 tblist.append(tb)
         if len(tblist) > 0:
             out.append(''.join(traceback.format_list(tblist)))
@@ -334,6 +316,7 @@ class Procedure(object):
         stable.set_frame((lgroup, self.modgroup))
         retval = None
         self._larch.retval = None
+        self._larch._calldepth += 1
         self._larch.debug = True
         for node in self.body:
             self._larch.run(node, fname=self.__file__, func=self,
@@ -345,18 +328,12 @@ class Procedure(object):
                 if retval is ReturnedNone: retval = None
                 break
         stable.restore_frame()
+        self._larch._calldepth -= 1
         self._larch.debug = False
         self._larch.retval = None
         del lgroup
         return retval
 
-def enable_plugins():
-    """add all available Larch plugin paths
-    """
-    if 'larch_plugins' not in sys.modules:
-        import larch
-        sys.modules['larch_plugins'] = larch
-    return sys.modules['larch_plugins']
 
 def add2path(envvar='PATH', dirname='.'):
     """add specified dir to begninng of PATH and
@@ -370,7 +347,7 @@ def add2path(envvar='PATH', dirname='.'):
         os.environ[envvar] = dirname
     else:
         paths = oldpath.split(sep)
-        paths.insert(0, os.path.abspath(dirname))
+        paths.insert(0, Path(dirname).absolute().as_posix())
         os.environ[envvar] = sep.join(paths)
     return oldpath
 
@@ -395,14 +372,14 @@ def get_dll(libname):
     # normally, we expect the dll to be here in the larch dlls tree
     # if we find it there, use that one
     fname = _dylib_formats[uname] % libname
-    dllpath = os.path.join(bindir, fname)
-    if os.path.exists(dllpath):
-        return loaddll(dllpath)
+    dllpath = Path(bindir, fname).absolute()
+    if dllpath.exists():
+        return loaddll(dllpath.as_posix())
 
     # if not found in the larch dlls tree, try your best!
-    dllpath = ctypes.util.find_library(libname)
-    if dllpath is not None and os.path.exists(dllpath):
-        return loaddll(dllpath)
+    dllpath = Path(ctypes.util.find_library(libname)).absolute()
+    if dllpath is not None and dllpath.exists():
+        return loaddll(dllpath.as_posix())
     return None
 
 
@@ -415,8 +392,8 @@ def read_workdir(conffile):
     """
 
     try:
-        w_file = os.path.join(usr_larchdir, conffile)
-        if os.path.exists(w_file):
+        w_file = Path(user_larchdir, conffile).absolute()
+        if w_file.exists():
             line = open(w_file, 'r').readlines()
             workdir = line[0][:-1]
             os.chdir(workdir)
@@ -432,29 +409,28 @@ def save_workdir(conffile):
     """
 
     try:
-        w_file = os.path.join(usr_larchdir, conffile)
-        fh = open(w_file, 'w')
-        fh.write("%s\n" % os.getcwd())
+        w_file = Path(user_larchdir, conffile).absolute()
+        fh = open(w_file, 'w', encoding=sys.getdefaultencoding())
+        fh.write("%s\n" % get_cwd())
         fh.close()
     except:
         pass
 
 
 def read_config(conffile):
-    """read yaml config file from users larch dir
+    """read toml config file from users larch dir
     compare save_config(conffile) which will save such a config
 
     returns dictionary / configuration
     """
-    cfile = os.path.join(usr_larchdir, conffile)
+    cfile = Path(user_larchdir, conffile).absolute()
     out = None
-    if os.path.exists(cfile):
-        with open(cfile, 'r') as fh:
-            out = fh.read()
-    if out is not None:
-        if not HAS_YAML:
-            raise RuntimeError('yaml is not available')
-        out = yaml.load(out)
+    if cfile.exists():
+        data = read_textfile(cfile)
+        try:
+            out = toml.loads(data)
+        except:
+            pass
     return out
 
 def save_config(conffile, config):
@@ -462,12 +438,12 @@ def save_config(conffile, config):
     compare read_confif(conffile) which will read this value
 
     """
-    cfile = os.path.join(usr_larchdir, conffile)
-    if not HAS_YAML:
-        raise RuntimeError('yaml is not available')
-    out = yaml.dump(config)
-    with open(cfile, 'w') as fh:
-        fh.write(out)
+    cfile = Path(user_larchdir, conffile).absolute()
+    dat = toml.dumps(config).encode('utf-8')
+    with open(cfile, 'wb') as fh:
+        fh.write(dat)
+    #except:
+    #    print(f"Could not save configuration file '{conffile:s}'")
 
 def parse_group_args(arg0, members=None, group=None, defaults=None,
                      fcn_name=None, check_outputs=True):
@@ -542,6 +518,8 @@ def Make_CallArgs(skipped_args):
     """
     decorator to create a 'call_args' dictionary
     containing function arguments
+    If a Group is included in the call arguments,
+    these call_args will be added to the group's journal
     """
     def wrap(fcn):
         def wrapper(*args, **kwargs):
@@ -549,7 +527,7 @@ def Make_CallArgs(skipped_args):
             argspec = inspect.getfullargspec(fcn)
 
             offset = len(argspec.args) - len(argspec.defaults)
-            call_args = OrderedDict()
+            call_args = {}
 
             for k in argspec.args[:offset]:
                 call_args[k] = None
@@ -574,11 +552,13 @@ def Make_CallArgs(skipped_args):
                 if k in call_args:
                     call_args.pop(k)
 
-            details_name = '%s_details' % fcn.__name__
-            if not hasattr(groupx, details_name):
-                setattr(groupx, details_name, Group())
-            setattr(getattr(groupx, details_name),
-                    'call_args', call_args)
+            if groupx is not None:
+                fname = fcn.__name__
+                if not hasattr(groupx, 'journal'):  groupx.journal = Journal()
+                if not hasattr(groupx, 'callargs'): groupx.callargs = Group()
+                setattr(groupx.callargs, fname, call_args)
+                groupx.journal.add(f'{fname}_callargs',  call_args)
+
             return result
         wrapper.__doc__ = fcn.__doc__
         wrapper.__name__ = fcn.__name__
@@ -588,33 +568,6 @@ def Make_CallArgs(skipped_args):
         return wrapper
     return wrap
 
-def ValidateLarchPlugin(fcn):
-    """function decorator to ensure that _larch is included in keywords,
-    and that it is a valid Interpeter in that it has:
-    1. a symtable attribute
-    2. a writer attribute
-    """
-    errmsg1 = "plugin function '%s' needs a '_larch' argument"
-    errmsg2 = "plugin function '%s' has an invalid '_larch'  '%s'"
-
-    def wrapper(*args, **keywords):
-        "ValidateLarchPlugin"
-        _larch = keywords.get('_larch', None)
-        if _larch is None:
-            raise LarchPluginException(errmsg1 % fcn.__name__)
-
-        symtab = getattr(_larch, 'symtable', None)
-        writer = getattr(_larch, 'writer', None)
-        if not (isgroup(symtab) and callable(getattr(writer, 'write', None))):
-            raise LarchPluginException(errmsg2 % (fcn.__name__, _larch))
-        return fcn(*args, **keywords)
-    wrapper.__doc__ = fcn.__doc__
-    wrapper.__name__ = fcn.__name__
-    wrapper._larchfunc_ = fcn
-    wrapper.__filename__ = fcn.__code__.co_filename
-    wrapper.__dict__.update(fcn.__dict__)
-    return wrapper
-
 
 def ensuremod(_larch, modname=None):
     "ensure that a group exists"
@@ -623,3 +576,122 @@ def ensuremod(_larch, modname=None):
         if modname is not None and not symtable.has_group(modname):
             symtable.newgroup(modname)
         return symtable
+
+Entry = namedtuple('Entry', ('key', 'value', 'datetime'))
+
+def _get_dtime(dtime=None):
+    """get datetime from input
+    dtime can be:
+       datetime :  used as is
+       str :    assumed to be isoformat
+       float :  assumed to unix timestamp
+       None :   means now
+    """
+    if isinstance(dtime, datetime):
+        return dtime
+    if isinstance(dtime, (int, float)):
+        return datetime.fromtimestamp(dtime)
+    elif isinstance(dtime, str):
+        return datetime.fromisoformat(dtime)
+    return datetime.now()
+
+class Journal:
+    """list of journal entries"""
+    def __init__(self, *args, **kws):
+        self.data = []
+        for arg in args:
+            if isinstance(arg, Journal):
+                for entry in arg.data:
+                    self.add(entry.key, entry.value, dtime=entry.datetime)
+            elif isinstance(arg, (list, tuple)):
+                for entry in arg:
+                    self.add(entry[0], entry[1], dtime=entry[2])
+
+        for k, v in kws.items():
+            self.add(k, v)
+
+    def tolist(self):
+        return [(x.key, x.value, x.datetime.isoformat()) for x in self.data]
+
+    def __repr__(self):
+        return repr(self.tolist())
+
+    def __iter__(self):
+        return iter(self.data)
+
+
+    def add(self, key, value, dtime=None):
+        """add journal entry:
+        key, value pair with optional datetime
+        """
+        self.data.append(Entry(key, value, _get_dtime(dtime)))
+
+    def add_ifnew(self, key, value, dtime=None):
+        """add journal entry unless it already matches latest
+        value (and dtime if supplied)
+        """
+        needs_add = True
+        latest = self.get(key, latest=True)
+        if latest is not None:
+            needs_add = (latest.value != value)
+            if not needs_add and dtime is not None:
+                dtime = _get_dtime(dtime)
+                needs_add = needs_add or (latest.dtime != dtime)
+
+        if needs_add:
+            self.add(key, value, dtime=dtime)
+
+    def get(self, key, latest=True):
+        """get journal entries by key
+
+        Arguments
+        ----------
+        latest [bool]   whether to return latest matching entry only [True]
+
+        Notes:
+        -------
+        if latest is True, one value will be returned,
+        otherwise a list of entries (possibly length 1) will be returned.
+
+        """
+        matches = [x for x in self.data if x.key==key]
+        if latest:
+            tlatest = 0
+            latest = None
+            for m in matches:
+                if m.datetime.timestamp() >  tlatest:
+                    latest = m
+            return latest
+        return matches
+
+    def keys(self):
+        return [x.key for x in self.data]
+
+    def values(self):
+        return [x.values for x in self.data]
+
+    def items(self):
+        return [(x.key, x.value) for x in self.data]
+
+    def get_latest(self, key):
+        return self.get(key, latest=True)
+
+    def get_matches(self, key):
+        return self.get(key, latest=False)
+
+    def sorted(self, sortby='time'):
+        "return all entries, sorted by time or alphabetically by key"
+        if 'time' in sortby.lower():
+            return sorted(self.data, key=lambda x: x.datetime.timestamp())
+        else:
+            return sorted(self.data, key=lambda x: x.key)
+
+    def __getstate__(self):
+        "get state for pickle / json encoding"
+        return [(x.key, x.value, x.datetime.isoformat()) for x in self.data]
+
+    def __setstate__(self, state):
+        "set state from pickle / json encoding"
+        self.data = []
+        for key, value, dt in state:
+            self.data.append(Entry(key, value, datetime.fromisoformat(dt)))

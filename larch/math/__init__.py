@@ -1,28 +1,32 @@
 __DOC__ = """Mathematical functions for Larch"""
 
-from .utils import (linregress, polyfit, realimag, as_ndarray,
-                    complex_phase, deriv, interp, interp1d,
-                    remove_dups, remove_nans2, index_of,
-                    index_nearest, savitzky_golay, smooth, boxcar)
+import numpy as np
+
+from lmfit import Parameter
+
+from .utils import (linregress, realimag, as_ndarray,
+                    complex_phase, deriv, interp, interp1d, safe_log,
+                    remove_dups, remove_nans, remove_nans2, index_of,
+                    index_nearest, savitzky_golay, smooth, boxcar, polyfit)
+
 
 from .lineshapes import (gaussian, lorentzian, voigt, pvoigt, hypermet,
                          pearson7, lognormal, gammaln,
                          breit_wigner, damped_oscillator,
-                         expgaussian, donaich, skewed_voigt,
+                         expgaussian, doniach, skewed_voigt,
                          students_t, logistic, erf, erfc, wofz)
 
-
+from .peaks import peak_indices
 from .fitpeak import fit_peak
+from .curvefit import curvefit_setup, curvefit_run
 from .convolution1D import glinbroad
 from .lincombo_fitting import lincombo_fit, lincombo_fitall, groups2matrix
-from .pca import pca_train, pca_fit, nmf_train
+from .pca import pca_train, pca_fit, nmf_train, save_pca_model, read_pca_model
 from .learn_regress import pls_train, pls_predict, lasso_train, lasso_predict
 from .gridxyz import gridxyz
 from .spline import spline_rep, spline_eval
 from . import transformations as trans
 
-from .tomography import (tomo_reconstruction, reshape_sinogram,
-                         trim_sinogram, TOMOPY_ALG, TOMOPY_FILT)
 
 _larch_builtins = {'_math': dict(linregress=linregress, polyfit=polyfit,
                                  realimag=realimag, as_ndarray=as_ndarray,
@@ -30,18 +34,24 @@ _larch_builtins = {'_math': dict(linregress=linregress, polyfit=polyfit,
                                  interp=interp, interp1d=interp1d,
                                  remove_dups=remove_dups,
                                  remove_nans2=remove_nans2,
+                                 safe_log=safe_log,
                                  index_of=index_of,
                                  index_nearest=index_nearest,
                                  savitzky_golay=savitzky_golay,
                                  smooth=smooth, boxcar=boxcar,
                                  glinbroad=glinbroad, gridxyz=gridxyz,
-                                 pca_train=pca_train, pca_fit=pca_fit,
+                                 pca_train=pca_train,
+                                 pca_fit=pca_fit,
+                                 save_pca_model=save_pca_model,
+                                 read_pca_model=read_pca_model,
                                  nmf_train=nmf_train,
                                  pls_train=pls_train,
                                  pls_predict=pls_predict,
                                  lasso_train=lasso_train,
                                  lasso_predict=lasso_predict,
                                  groups2matrix=groups2matrix,
+                                 curvefit_setup=curvefit_setup,
+                                 curvefit_run=curvefit_run,
                                  fit_peak=fit_peak,
                                  lincombo_fit=lincombo_fit,
                                  lincombo_fitall=lincombo_fitall,
@@ -54,7 +64,8 @@ _larch_builtins = {'_math': dict(linregress=linregress, polyfit=polyfit,
                                  gammaln=gammaln,
                                  breit_wigner=breit_wigner,
                                  damped_oscillator=damped_oscillator,
-                                 expgaussian=expgaussian, donaich=donaich,
+                                 expgaussian=expgaussian,
+                                 doniach=doniach,
                                  skewed_voigt=skewed_voigt,
                                  students_t=students_t, logistic=logistic,
                                  erf=erf, erfc=erfc, wofz=wofz),

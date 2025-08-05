@@ -4,12 +4,21 @@ Some common math utilities
 """
 import numpy as np
 
-from scipy import polyfit
 from scipy.stats import linregress
 from scipy.interpolate import UnivariateSpline
+from scipy.interpolate import InterpolatedUnivariateSpline as IUSpline
 from scipy.interpolate import interp1d as scipy_interp1d
 
 from .lineshapes import gaussian, lorentzian, voigt
+
+
+import scipy.constants as consts
+KTOE = 1.e20*consts.hbar**2 / (2*consts.m_e * consts.e) # 3.8099819442818976
+ETOK = 1.0/KTOE
+def etok(energy):
+    """convert photo-electron energy to wavenumber"""
+    if energy < 0: return 0
+    return np.sqrt(energy*ETOK)
 
 def as_ndarray(obj):
     """
@@ -70,7 +79,7 @@ def complex_phase(arr):
     "return phase, modulo 2pi jumps"
     phase = np.arctan2(arr.imag, arr.real)
     d   = np.diff(phase)/np.pi
-    out = 1.0*phase[:]
+    out = phase[:]*1.0
     out[1:] -= np.pi*(np.round(abs(d))*np.sign(d)).cumsum()
     return out
 
@@ -127,6 +136,11 @@ def interp(x, y, xnew, kind='linear', fill_value=np.nan, **kws):
     above = np.where(xnew>x[-1])[0]
     if len(above) == 0 and len(below) == 0:
         return out
+
+    if (len(np.where(np.diff(np.argsort(x))!=1)[0]) > 0 or
+        len(np.where(np.diff(np.argsort(xnew))!=1)[0]) > 0):
+        return out
+
     for span, isbelow in ((below, True), (above, False)):
         if len(span) < 1:
             continue
@@ -138,28 +152,32 @@ def interp(x, y, xnew, kind='linear', fill_value=np.nan, **kws):
         sel = slice(None, ncoef) if isbelow  else slice(-ncoef, None)
         if kind.startswith('lin'):
             coefs = polyfit(x[sel], y[sel], 1)
-            out[span] = coefs[1] + coefs[0]*xnew[span]
+            out[span] = coefs[0]
+            if len(coefs) > 1:
+                out[span] += coefs[1]*xnew[span]
         elif kind.startswith('quad'):
             coefs = polyfit(x[sel], y[sel], 2)
-            out[span] = coefs[2] + xnew[span]*(coefs[1] + coefs[0]*xnew[span])
+            out[span] = coefs[0]
+            if len(coefs) > 1:
+                out[span] += coefs[1]*xnew[span]
+            if len(coefs) > 2:
+                out[span] += coefs[2]*xnew[span]**2
         elif kind.startswith('cubic'):
-            out[span] = UnivariateSpline(x[sel], y[sel], s=0)(xnew[span])
+            out[span] = IUSpline(x[sel], y[sel])(xnew[span])
     return out
 
 
-def remove_dups(arr, tiny=1.e-7, frac=1.e-6):
+def remove_dups(arr, tiny=1.e-6):
     """avoid repeated successive values of an array that is expected
     to be monotonically increasing.
 
     For repeated values, the second encountered occurance (at index i)
-    will be increased by an amount that is the largest of:
-      (tiny, frac*abs(arr[i]-arr[i-1]))
+    will be increased by an amount given by tiny
 
     Parameters
     ----------
     arr :  array of values expected to be monotonically increasing
-    tiny : smallest expected absolute value of interval [1.e-7]
-    frac : smallest expected fractional interval   [1.e-6]
+    tiny : smallest expected absolute value of interval [1.e-6]
 
     Returns
     -------
@@ -167,39 +185,71 @@ def remove_dups(arr, tiny=1.e-7, frac=1.e-6):
 
     Example
     -------
-    >>> x = np.array([0, 1.1, 2.2, 2.2, 3.3])
-    >>> print remove_dups(x)
-    >>> array([ 0.   ,  1.1  ,  2.2,  2.2000001,  3.3  ])
+    >>> x = np.array([1, 2, 3, 3, 3, 4, 5, 6, 7, 7, 8])
+    >>> remove_dups(x)
+    array([1.      , 2.      , 3.      , 3.000001, 3.000002, 4.      ,
+           5.      , 6.      , 7.      , 7.000001, 8.      ])
     """
-    if not isinstance(arr, np.ndarray):
-        try:
-            arr = np.array(arr)
-        except:
-            print( 'remove_dups: argument is not an array')
-
-    shape = arr.shape
-    arr   = arr.flatten()
-    npts  = len(arr)
-    dups = []
     try:
-        reps = np.where(abs(arr[1:-1] - arr[:-2]) < tiny)[0].tolist()
-        dups.extend([i+1 for i in reps])
-    except ValueError:
-        pass
-    if abs(arr[-1] - arr[-2]) < tiny:
-        dups.append(npts-1)
-    arr = arr.tolist()
-    for i in range(1, len(arr)):
-        t = tiny
-        if i > 0:
-            t = max(tiny, frac*abs(arr[i]-arr[i-1]))
-        if arr[i] - arr[i-1] < tiny:
-            arr[i] = arr[i-1] + t
-    if abs(arr[-1] - arr[-2]) < tiny:
-        arr[-1] = arr[-2] + tiny
-    arr = np.array(arr)
-    arr.shape = shape
-    return arr
+        work = np.asarray(arr)
+    except Exception:
+        print('remove_dups: argument is not an array')
+
+    if work.size <= 1:
+        return arr
+    shape = work.shape
+    work = work.flatten()
+
+    min_step = min(np.diff(work))
+    tval = (abs(min(work)) + abs(max(work))) /2.0
+    if min_step > 10*tiny:
+        return work
+    previous_val = np.nan
+    previous_add = 0
+
+    npts = len(work)
+    add = np.zeros(npts)
+    for i in range(1, npts):
+        if not np.isnan(work[i-1]):
+            previous_val = work[i-1]
+            previous_add = add[i-1]
+        val = work[i]
+        if np.isnan(val) or np.isnan(previous_val):
+            continue
+        diff = abs(val - previous_val)
+        if diff < tiny:
+            add[i] = previous_add + tiny
+    return work+add
+
+
+def remove_nans(val, goodval=0.0, default=0.0, interp=False):
+    """
+    remove nan / inf from an value (array or scalar),
+    and replace with 'goodval'.
+
+    """
+    isbad = ~np.isfinite(val)
+    if not np.any(isbad):
+        return val
+
+    if isinstance(goodval, np.ndarray):
+        goodval = goodval.mean()
+    if np.any(~np.isfinite(goodval)):
+        goodval = default
+
+    if not isinstance(val, np.ndarray):
+        return goodval
+    if interp:
+        for i in np.where(isbad)[0]:
+            if i == 0:
+                val[i] = 2.0*val[1] - val[2]
+            elif i == len(val)-1:
+                val[i] = 2.0*val[i-1] - val[i-2]
+            else:
+                val[i] = 0.5*(val[i+1] + val[i-1])
+        isbad = ~np.isfinite(val)
+    val[np.where(isbad)] = goodval
+    return val
 
 
 def remove_nans2(a, b):
@@ -234,31 +284,22 @@ def remove_nans2(a, b):
             b = np.array(b)
         except:
             print( 'remove_nans2: argument 2 is not an array')
-    if (np.any(np.isinf(a)) or np.any(np.isinf(b)) or
-        np.any(np.isnan(a)) or np.any(np.isnan(b))):
-        a1 = a[:]
-        b1 = b[:]
-        if np.any(np.isinf(a)):
-            bad = np.where(a==np.inf)[0]
-            a1 = np.delete(a1, bad)
-            b1 = np.delete(b1, bad)
-        if np.any(np.isinf(b)):
-            bad = np.where(b==np.inf)[0]
-            a1 = np.delete(a1, bad)
-            b1 = np.delete(b1, bad)
-        if np.any(np.isnan(a)):
-            bad = np.where(a==np.nan)[0]
-            a1 = np.delete(a1, bad)
-            b1 = np.delete(b1, bad)
-        if np.any(np.isnan(b)):
-            bad = np.where(b==np.nan)[0]
-            a1 = np.delete(a1, bad)
-            b1 = np.delete(b1, bad)
-        return a1, b1
+
+    def fix_bad(isbad, x, y):
+        if np.any(isbad):
+            bad = np.where(isbad)[0]
+            x, y = np.delete(x, bad), np.delete(y, bad)
+        return x, y
+
+    a, b = fix_bad(~np.isfinite(a), a, b)
+    a, b = fix_bad(~np.isfinite(b), a, b)
     return a, b
 
 
-def smooth(x, y, sigma=1, gamma=None, npad=None, form='lorentzian'):
+def safe_log(x, extreme=50):
+    return np.log(np.clip(x, np.e**-extreme, np.e**extreme))
+
+def smooth(x, y, sigma=1, gamma=None, xstep=None, npad=None, form='lorentzian'):
     """smooth a function y(x) by convolving wih a lorentzian, gaussian,
     or voigt function.
 
@@ -279,13 +320,16 @@ def smooth(x, y, sigma=1, gamma=None, npad=None, form='lorentzian'):
     """
     # make uniform x, y data
     TINY = 1.e-12
-    xstep = min(np.diff(x))
+    if xstep is None:
+        xstep = min(np.diff(x))
     if xstep < TINY:
         raise Warning('Cannot smooth data: must be strictly increasing ')
-    npad = 5
+    if npad is None:
+        npad = 5
     xmin = xstep * int( (min(x) - npad*xstep)/xstep)
     xmax = xstep * int( (max(x) + npad*xstep)/xstep)
-    npts = 1 + int(abs(xmax-xmin+xstep*0.1)/xstep)
+    npts1 = 1 + int(abs(xmax-xmin+xstep*0.1)/xstep)
+    npts = min(npts1, 50*len(x))
     x0  = np.linspace(xmin, xmax, npts)
     y0  = np.interp(x0, x, y)
 
@@ -365,15 +409,15 @@ def savitzky_golay(y, window_size, order, deriv=0):
         window_size = abs(int(window_size))
         order = abs(int(order))
     except ValueError:
-        raise ValueError("window_size and order have to be of type int")
-    if window_size % 2 != 1 or window_size < 1:
-        raise TypeError("window_size size must be a positive odd number")
+        raise ValueError("window_size and order must be integers")
     if window_size < order + 2:
-        raise TypeError("window_size is too small for the polynomials order")
+        window_size = order + 3
+    if window_size % 2 != 1 or window_size < 1:
+        window_size = window_size + 1
     order_range = range(order+1)
     half_window = (window_size -1) // 2
     # precompute coefficients
-    b = np.mat([[k**i for i in order_range] for k in range(-half_window, half_window+1)])
+    b = np.asmatrix([[k**i for i in order_range] for k in range(-half_window, half_window+1)])
     m = np.linalg.pinv(b).A[deriv]
     # pad the signal at the extremes with
     # values taken from the signal itself
@@ -399,7 +443,7 @@ def boxcar(data, nrepeats=1):
     -----
       This does a 3-point smoothing, that can be repeated
 
-      out = data[:]
+      out = data[:]*1.0
       for i in range(nrepeats):
           qdat = out/4.0
           left  = 1.0*qdat
@@ -410,7 +454,7 @@ def boxcar(data, nrepeats=1):
     return out
 
     """
-    out = data[:]
+    out = data[:]*1.0
     for i in range(nrepeats):
         qdat = out/4.0
         left  = 1.0*qdat
@@ -419,3 +463,14 @@ def boxcar(data, nrepeats=1):
         left[:-1] = qdat[1:]
         out = 2*qdat + left + right
     return out
+
+def polyfit(x, y, deg=1, reverse=False):
+    """
+    simple emulation of deprecated numpy.polyfit,
+    including its ordering of coefficients
+    """
+    pfit = np.polynomial.Polynomial.fit(x, y, deg=int(deg))
+    coefs = pfit.convert().coef
+    if reverse:
+        coefs = list(reversed(coefs))
+    return list(coefs)
